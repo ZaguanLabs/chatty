@@ -25,6 +25,12 @@ profile.cov
 go.work
 go.work.sum
 
+# Configuration files (may contain API keys)
+config.yaml
+config.yml
+*.config.yaml
+*.config.yml
+
 # env file
 .env
 
