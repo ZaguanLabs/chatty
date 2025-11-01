@@ -4,9 +4,7 @@ A dead-simple, blazing-fast terminal chat client for OpenAI-compatible APIs writ
 
 ## Features
 
-- **Fast startup**: Near-instant launch with minimal overhead (~600 lines of code)
-- **Streaming responses**: Real-time token-by-token display for a ChatGPT-like experience
-- **Markdown rendering**: Beautiful syntax highlighting for code blocks, headers, lists, and more
+- **Fast startup**: Near-instant launch with minimal overhead (~512 lines of code)
 - **Simple & clean**: Intuitive command-line interface with ANSI colors
 - **Config-driven**: Loads settings from `config.yaml` with environment overrides
 - **Interactive chat**: Real-time conversation with in-memory history
@@ -44,14 +42,12 @@ api:
 model:
   name: "gpt-4o-mini"
   temperature: 0.7
-  stream: true              # Enable streaming for real-time responses
+  stream: true
 ui:
   show_timestamps: true
 logging:
   level: "info"
 ```
-
-**Streaming:** Set `stream: true` to see responses appear token-by-token in real-time (like ChatGPT). Set to `false` for traditional request-response mode.
 
 Environment variables override several fields:
 
@@ -67,12 +63,6 @@ go run ./cmd/chatty
 # Or build and run
 go build ./cmd/chatty
 ./chatty
-
-# Show version
-./chatty --version
-
-# Use custom config file
-./chatty --config /path/to/config.yaml
 ```
 
 ### Available Commands
@@ -94,13 +84,13 @@ chatty/
 ├── internal/
 │   ├── config/
 │   │   └── config.go     # Config loading (~127 lines)
-│   ├── client.go         # OpenAI HTTP client with streaming (~200 lines)
-│   └── chat.go           # Chat loop + colors (~230 lines)
+│   ├── client.go         # OpenAI HTTP client (~122 lines)
+│   └── chat.go           # Chat loop + colors (~218 lines)
 ├── config.yaml
 └── go.mod
 ```
 
-**Total: ~600 lines of production code**
+**Total: ~512 lines of production code**
 
 ## Development
 
@@ -110,4 +100,4 @@ chatty/
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+TBD

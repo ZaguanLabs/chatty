@@ -10,11 +10,7 @@ import (
 	"strings"
 
 	"github.com/PromptShieldLabs/chatty/internal/config"
-	"github.com/charmbracelet/glamour"
 )
-
-// Version is the current version of Chatty
-const Version = "0.1.0"
 
 // ANSI color codes for terminal output
 const (
@@ -27,14 +23,12 @@ const (
 
 // Session manages a chat conversation with history.
 type Session struct {
-	client       *Client
-	config       *config.Config
-	history      []Message
-	input        io.Reader
-	output       io.Writer
-	useColors    bool
-	mdRenderer   *glamour.TermRenderer
-	useMarkdown  bool
+	client    *Client
+	config    *config.Config
+	history   []Message
+	input     io.Reader
+	output    io.Writer
+	useColors bool
 }
 
 // NewSession creates a new chat session.
@@ -46,25 +40,13 @@ func NewSession(client *Client, cfg *config.Config) (*Session, error) {
 		return nil, errors.New("config cannot be nil")
 	}
 
-	// Initialize Markdown renderer with dark style
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(100),
-	)
-	if err != nil {
-		// If glamour fails, we'll just disable markdown rendering
-		renderer = nil
-	}
-
 	return &Session{
-		client:      client,
-		config:      cfg,
-		history:     make([]Message, 0, 16),
-		input:       os.Stdin,
-		output:      os.Stdout,
-		useColors:   true,
-		mdRenderer:  renderer,
-		useMarkdown: renderer != nil,
+		client:    client,
+		config:    cfg,
+		history:   make([]Message, 0, 16),
+		input:     os.Stdin,
+		output:    os.Stdout,
+		useColors: true,
 	}, nil
 }
 
@@ -121,40 +103,8 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	userMsg := Message{Role: "user", Content: input}
 	s.history = append(s.history, userMsg)
 
-	var reply string
-	var err error
-
-	// Call API with streaming if configured
-	if s.config.Model.Stream {
-		if s.useMarkdown && s.mdRenderer != nil {
-			// With Markdown: buffer tokens silently, render at the end
-			reply, err = s.client.ChatStream(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature, func(token string) error {
-				// Just accumulate, don't print yet
-				return nil
-			})
-			
-			// Render the complete response with Markdown
-			if err == nil && reply != "" {
-				s.printAssistant(reply)
-			}
-		} else {
-			// Without Markdown: show tokens in real-time
-			reply, err = s.client.ChatStream(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature, func(token string) error {
-				// Print each token as it arrives
-				fmt.Fprint(s.output, s.colorize(colorGreen, token))
-				return nil
-			})
-			
-			// Add newline after streaming completes
-			fmt.Fprintln(s.output, colorReset)
-		}
-	} else {
-		reply, err = s.client.Chat(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature)
-		if err == nil {
-			s.printAssistant(reply)
-		}
-	}
-
+	// Call API
+	reply, err := s.client.Chat(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature)
 	if err != nil {
 		// Remove the user message if the request failed
 		s.history = s.history[:len(s.history)-1]
@@ -164,6 +114,9 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	// Add assistant response to history
 	assistantMsg := Message{Role: "assistant", Content: reply}
 	s.history = append(s.history, assistantMsg)
+
+	// Print response
+	s.printAssistant(reply)
 
 	return nil
 }
@@ -193,7 +146,7 @@ func (s *Session) handleCommand(cmd string) (exit bool, err error) {
 }
 
 func (s *Session) printWelcome() {
-	s.println(s.colorize(colorCyan, fmt.Sprintf("=== Chatty v%s ===", Version)))
+	s.println(s.colorize(colorCyan, "=== Chatty ==="))
 	s.println(fmt.Sprintf("Model: %s | Temperature: %.1f", s.config.Model.Name, s.config.Model.Temperature))
 	s.println(s.colorize(colorYellow, "Type /help for commands, /exit to quit"))
 	s.println("")
@@ -231,18 +184,7 @@ func (s *Session) printPrompt() {
 }
 
 func (s *Session) printAssistant(text string) {
-	if s.useMarkdown && s.mdRenderer != nil {
-		// Render markdown
-		rendered, err := s.mdRenderer.Render(text)
-		if err != nil {
-			// Fallback to plain text if rendering fails
-			s.println(s.colorize(colorGreen, text))
-		} else {
-			fmt.Fprint(s.output, rendered)
-		}
-	} else {
-		s.println(s.colorize(colorGreen, text))
-	}
+	s.println(s.colorize(colorGreen, text))
 }
 
 func (s *Session) printError(text string) {
@@ -273,9 +215,4 @@ func (s *Session) SetIO(in io.Reader, out io.Writer) {
 // DisableColors turns off ANSI color output.
 func (s *Session) DisableColors() {
 	s.useColors = false
-}
-
-// DisableMarkdown turns off Markdown rendering.
-func (s *Session) DisableMarkdown() {
-	s.useMarkdown = false
 }
