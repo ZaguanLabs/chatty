@@ -12,8 +12,16 @@ import (
 
 func main() {
 	var configPath string
+	var showVersion bool
 	flag.StringVar(&configPath, "config", "", "Path to configuration file")
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.Parse()
+
+	// Show version and exit if requested
+	if showVersion {
+		fmt.Printf("Chatty v%s\n", internal.Version)
+		os.Exit(0)
+	}
 
 	// Load configuration
 	cfg, err := config.Load(configPath)

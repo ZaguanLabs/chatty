@@ -23,7 +23,7 @@ func TestLoad_DefaultConfigWithEnvOverrides(t *testing.T) {
 		t.Fatalf("expected API key override, got %q", cfg.API.Key)
 	}
 
-	if cfg.Model.Name != "gpt-4o-mini" {
+	if cfg.Model.Name != "groq/moonshotai/kimi-k2-instruct-0905" {
 		t.Fatalf("expected default model name, got %q", cfg.Model.Name)
 	}
 }
