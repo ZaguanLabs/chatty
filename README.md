@@ -33,14 +33,16 @@ go build ./cmd/chatty
 
 ### Configuration
 
+To use Chatty, you'll need an API key from [PromptShield](https://promptshield.io). Head over there to register and get your API key.
+
 Create `config.yaml` in the project root or pass `--config` to specify a path. A minimal configuration looks like:
 
 ```yaml
 api:
-  url: "https://api.openai.com/v1"
+  url: "https://api.promptshield.io/v1"
   key: "${CHATTY_API_KEY}"
 model:
-  name: "gpt-4o-mini"
+  name: "openai/gpt-4o-mini"
   temperature: 0.7
   stream: true
 ui:
