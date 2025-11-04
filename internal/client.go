@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,7 +13,10 @@ import (
 	"time"
 )
 
-const defaultTimeout = 30 * time.Second
+const (
+	defaultTimeout    = 30 * time.Second
+	streamingTimeout  = 120 * time.Second
+)
 
 // Message represents a single chat message.
 type Message struct {
@@ -88,6 +92,95 @@ func (c *Client) Chat(ctx context.Context, messages []Message, model string, tem
 	}
 
 	return c.decodeSuccess(resp.Body)
+}
+
+// ChatStream sends a streaming chat completion request and calls onChunk for each content delta.
+func (c *Client) ChatStream(ctx context.Context, messages []Message, model string, temperature float64, onChunk func(string) error) error {
+	if c == nil {
+		return errors.New("client is nil")
+	}
+
+	reqBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   true,
+	}
+
+	// Include temperature only if not an o3 model
+	if !strings.HasPrefix(model, "o3") {
+		reqBody["temperature"] = temperature
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("encode request: %w", err)
+	}
+
+	// Use a client with longer timeout for streaming
+	streamClient := &http.Client{
+		Timeout: streamingTimeout,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return c.decodeError(bytes.NewReader(bodyBytes), resp.StatusCode)
+	}
+
+	return c.processStream(resp.Body, onChunk)
+}
+
+func (c *Client) processStream(r io.Reader, onChunk func(string) error) error {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			return nil
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // Skip malformed chunks
+		}
+
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			if err := onChunk(chunk.Choices[0].Delta.Content); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("stream read error: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Client) decodeSuccess(r io.Reader) (string, error) {

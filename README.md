@@ -4,11 +4,13 @@ A dead-simple, blazing-fast terminal chat client for OpenAI-compatible APIs writ
 
 ## Features
 
-- **Fast startup**: Near-instant launch with minimal overhead (~512 lines of code)
+- **Fast startup**: Near-instant launch with minimal overhead
+- **Streaming responses**: Real-time token-by-token output for immediate feedback
+- **Markdown rendering**: Beautiful formatted output with syntax highlighting for code blocks
 - **Simple & clean**: Intuitive command-line interface with ANSI colors
 - **Config-driven**: Loads settings from `config.yaml` with environment overrides
 - **Interactive chat**: Real-time conversation with in-memory history
-- **Lean architecture**: Just 4 Go files - easy to understand and modify
+- **Lean architecture**: Easy to understand and modify
 
 ## Getting Started
 
@@ -33,9 +35,11 @@ go build ./cmd/chatty
 
 ### Configuration
 
-To use Chatty, you'll need an API key from [PromptShield](https://promptshield.io). Head over there to register and get your API key.
+Chatty works with any OpenAI-compatible API provider. Create `config.yaml` in the project root or pass `--config` to specify a path.
 
-Create `config.yaml` in the project root or pass `--config` to specify a path. A minimal configuration looks like:
+#### Using PromptShield
+
+[PromptShield](https://promptshield.io) provides access to multiple AI models through a unified API:
 
 ```yaml
 api:
@@ -45,26 +49,75 @@ model:
   name: "openai/gpt-4o-mini"
   temperature: 0.7
   stream: true
-ui:
-  show_timestamps: true
-logging:
-  level: "info"
 ```
 
-Environment variables override several fields:
+#### Using OpenAI Directly
 
-- `CHATTY_API_URL`
-- `CHATTY_API_KEY`
+```yaml
+api:
+  url: "https://api.openai.com/v1"
+  key: "${CHATTY_API_KEY}"
+model:
+  name: "gpt-4o-mini"
+  temperature: 0.7
+  stream: true
+```
+
+#### Using Other Compatible Providers
+
+Chatty works with any OpenAI-compatible API. Examples:
+
+**xAI (Grok):**
+```yaml
+api:
+  url: "https://api.x.ai/v1"
+  key: "${CHATTY_API_KEY}"
+model:
+  name: "grok-beta"
+  temperature: 0.7
+  stream: true
+```
+
+**Anthropic (via compatible proxy):**
+```yaml
+api:
+  url: "https://api.anthropic-proxy.com/v1"
+  key: "${CHATTY_API_KEY}"
+model:
+  name: "claude-3-5-sonnet-20241022"
+  temperature: 0.7
+  stream: true
+```
+
+**Local models (Ollama, LM Studio, etc.):**
+```yaml
+api:
+  url: "http://localhost:11434/v1"
+  key: "not-needed"
+model:
+  name: "llama3.2"
+  temperature: 0.7
+  stream: true
+```
+
+#### Environment Variables
+
+Environment variables override config file values:
+
+- `CHATTY_API_URL` - Override the API endpoint
+- `CHATTY_API_KEY` - Override the API key
 
 ### Running
 
 ```bash
-# Run directly
-go run ./cmd/chatty
+# Build with version info
+make build
 
-# Or build and run
-go build ./cmd/chatty
+# Run
 ./chatty
+
+# Or build and run directly
+make run
 ```
 
 ### Available Commands
@@ -74,6 +127,7 @@ Once running, you can use these commands:
 - `/exit` or `/quit` - Exit the chat
 - `/reset` or `/clear` - Clear conversation history
 - `/history` - Show conversation history
+- `/markdown` - Toggle markdown rendering on/off
 
 ## Architecture
 
@@ -96,8 +150,9 @@ chatty/
 
 ## Development
 
-- Run tests: `go test ./...`
-- Build: `go build ./cmd/chatty`
+- Run tests: `make test`
+- Build: `make build`
+- Install: `make install`
 - Format: `go fmt ./...`
 
 ## License

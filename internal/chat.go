@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/PromptShieldLabs/chatty/internal/config"
+	"github.com/charmbracelet/glamour"
 )
 
 // ANSI color codes for terminal output
@@ -23,13 +24,15 @@ const (
 
 // Session manages a chat conversation with history.
 type Session struct {
-	client    *Client
-	config    *config.Config
-	history   []Message
-	input     io.Reader
-	output    io.Writer
-	useColors bool
-	version   string
+	client       *Client
+	config       *config.Config
+	history      []Message
+	input        io.Reader
+	output       io.Writer
+	useColors    bool
+	version      string
+	mdRenderer   *glamour.TermRenderer
+	renderMarkdown bool
 }
 
 // NewSession creates a new chat session.
@@ -41,14 +44,25 @@ func NewSession(client *Client, cfg *config.Config, version string) (*Session, e
 		return nil, errors.New("config cannot be nil")
 	}
 
+	// Initialize markdown renderer with dark style
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(100),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create markdown renderer: %w", err)
+	}
+
 	return &Session{
-		client:    client,
-		config:    cfg,
-		history:   make([]Message, 0, 16),
-		input:     os.Stdin,
-		output:    os.Stdout,
-		useColors: true,
-		version:   version,
+		client:         client,
+		config:         cfg,
+		history:        make([]Message, 0, 16),
+		input:          os.Stdin,
+		output:         os.Stdout,
+		useColors:      true,
+		version:        version,
+		mdRenderer:     renderer,
+		renderMarkdown: true,
 	}, nil
 }
 
@@ -105,8 +119,20 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	userMsg := Message{Role: "user", Content: input}
 	s.history = append(s.history, userMsg)
 
-	// Call API
-	reply, err := s.client.Chat(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature)
+	var reply string
+	var err error
+
+	if s.config.Model.Stream {
+		// Streaming mode
+		reply, err = s.streamResponse(ctx)
+	} else {
+		// Non-streaming mode
+		reply, err = s.client.Chat(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature)
+		if err == nil {
+			s.printAssistant(reply)
+		}
+	}
+
 	if err != nil {
 		// Remove the user message if the request failed
 		s.history = s.history[:len(s.history)-1]
@@ -117,10 +143,28 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	assistantMsg := Message{Role: "assistant", Content: reply}
 	s.history = append(s.history, assistantMsg)
 
-	// Print response
-	s.printAssistant(reply)
-
 	return nil
+}
+
+func (s *Session) streamResponse(ctx context.Context) (string, error) {
+	var fullResponse strings.Builder
+
+	// For streaming with markdown, we collect chunks and render at the end
+	// For now, stream raw text and render markdown after completion
+	err := s.client.ChatStream(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature, func(chunk string) error {
+		fullResponse.WriteString(chunk)
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	response := fullResponse.String()
+	// Render the complete response with markdown
+	s.printAssistant(response)
+
+	return response, nil
 }
 
 func (s *Session) handleCommand(cmd string) (exit bool, err error) {
@@ -142,6 +186,15 @@ func (s *Session) handleCommand(cmd string) (exit bool, err error) {
 		s.printHistory()
 		return false, nil
 
+	case "/markdown":
+		s.renderMarkdown = !s.renderMarkdown
+		status := "enabled"
+		if !s.renderMarkdown {
+			status = "disabled"
+		}
+		s.println(s.colorize(colorYellow, fmt.Sprintf("Markdown rendering %s.", status)))
+		return false, nil
+
 	default:
 		return false, fmt.Errorf("unknown command %q. Try /help", cmd)
 	}
@@ -159,7 +212,8 @@ func (s *Session) printHelp() {
   /help     - Show this help message
   /exit     - Exit the chat
   /reset    - Clear conversation history
-  /history  - Show conversation history`
+  /history  - Show conversation history
+  /markdown - Toggle markdown rendering`
 	s.println(s.colorize(colorYellow, help))
 }
 
@@ -186,7 +240,19 @@ func (s *Session) printPrompt() {
 }
 
 func (s *Session) printAssistant(text string) {
-	s.println(s.colorize(colorGreen, text))
+	if s.renderMarkdown && s.mdRenderer != nil {
+		// Render markdown
+		rendered, err := s.mdRenderer.Render(text)
+		if err != nil {
+			// Fallback to plain text if rendering fails
+			s.println(s.colorize(colorGreen, text))
+			return
+		}
+		fmt.Fprint(s.output, rendered)
+	} else {
+		// Plain text mode
+		s.println(s.colorize(colorGreen, text))
+	}
 }
 
 func (s *Session) printError(text string) {
