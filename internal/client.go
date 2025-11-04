@@ -34,7 +34,7 @@ func NewClient(apiKey, baseURL string) (*Client, error) {
 		return nil, errors.New("api key cannot be empty")
 	}
 	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
+		return nil, errors.New("base URL cannot be empty")
 	}
 
 	return &Client{
@@ -53,10 +53,14 @@ func (c *Client) Chat(ctx context.Context, messages []Message, model string, tem
 	}
 
 	reqBody := map[string]interface{}{
-		"model":       model,
-		"messages":    messages,
-		"temperature": temperature,
-		"stream":      false,
+		"model":    model,
+		"messages": messages,
+		"stream":   false,
+	}
+
+	// Include temperature only if not an o3 model
+	if !strings.HasPrefix(model, "o3") {
+		reqBody["temperature"] = temperature
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -79,7 +83,8 @@ func (c *Client) Chat(ctx context.Context, messages []Message, model string, tem
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", c.decodeError(resp.Body, resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", c.decodeError(bytes.NewReader(bodyBytes), resp.StatusCode)
 	}
 
 	return c.decodeSuccess(resp.Body)
@@ -105,17 +110,25 @@ func (c *Client) decodeSuccess(r io.Reader) (string, error) {
 
 func (c *Client) decodeError(r io.Reader, status int) error {
 	var apiErr struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		Error interface{} `json:"error"`
 	}
 
 	if err := json.NewDecoder(r).Decode(&apiErr); err != nil {
 		return fmt.Errorf("api error (status %d): failed to decode body: %w", status, err)
 	}
 
-	if apiErr.Error.Message != "" {
-		return fmt.Errorf("api error (status %d): %s", status, apiErr.Error.Message)
+	var message string
+	switch e := apiErr.Error.(type) {
+	case string:
+		message = e
+	case map[string]interface{}:
+		if msg, ok := e["message"].(string); ok {
+			message = msg
+		}
+	}
+
+	if message != "" {
+		return fmt.Errorf("api error (status %d): %s", status, message)
 	}
 
 	return fmt.Errorf("api error (status %d)", status)

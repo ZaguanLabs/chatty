@@ -82,6 +82,10 @@ func loadFile(path string, cfg *Config) error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
+	// Expand environment variables in config values
+	cfg.API.Key = os.ExpandEnv(cfg.API.Key)
+	cfg.API.URL = os.ExpandEnv(cfg.API.URL)
+
 	return nil
 }
 
@@ -98,6 +102,9 @@ func (c *Config) validate() error {
 	if strings.TrimSpace(c.API.URL) == "" {
 		return errors.New("api.url must be set")
 	}
+	if strings.Contains(c.API.Key, "${") {
+		return errors.New("api.key contains unexpanded environment variable, set CHATTY_API_KEY or replace in config")
+	}
 	if strings.TrimSpace(c.API.Key) == "" {
 		return errors.New("api.key must be set or CHATTY_API_KEY provided")
 	}
@@ -110,7 +117,7 @@ func (c *Config) validate() error {
 func defaultConfig() Config {
 	return Config{
 		API: APIConfig{
-			URL: "https://api.promptshield.io/v1",
+			URL: "",
 		},
 		Model: ModelConfig{
 			Name:        "groq/moonshotai/kimi-k2-instruct-0905",

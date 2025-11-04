@@ -10,6 +10,12 @@ import (
 	"github.com/PromptShieldLabs/chatty/internal/config"
 )
 
+var (
+	version = "0.1.0"
+	commit  = ""
+	date    = "2025-11-04"
+)
+
 func main() {
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "Path to configuration file")
@@ -30,7 +36,7 @@ func main() {
 	}
 
 	// Create chat session
-	session, err := internal.NewSession(client, cfg)
+	session, err := internal.NewSession(client, cfg, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create session: %v\n", err)
 		os.Exit(1)

@@ -29,10 +29,11 @@ type Session struct {
 	input     io.Reader
 	output    io.Writer
 	useColors bool
+	version   string
 }
 
 // NewSession creates a new chat session.
-func NewSession(client *Client, cfg *config.Config) (*Session, error) {
+func NewSession(client *Client, cfg *config.Config, version string) (*Session, error) {
 	if client == nil {
 		return nil, errors.New("client cannot be nil")
 	}
@@ -47,6 +48,7 @@ func NewSession(client *Client, cfg *config.Config) (*Session, error) {
 		input:     os.Stdin,
 		output:    os.Stdout,
 		useColors: true,
+		version:   version,
 	}, nil
 }
 
@@ -146,7 +148,7 @@ func (s *Session) handleCommand(cmd string) (exit bool, err error) {
 }
 
 func (s *Session) printWelcome() {
-	s.println(s.colorize(colorCyan, "=== Chatty ==="))
+	s.println(s.colorize(colorCyan, fmt.Sprintf("=== Chatty v%s ===", s.version)))
 	s.println(fmt.Sprintf("Model: %s | Temperature: %.1f", s.config.Model.Name, s.config.Model.Temperature))
 	s.println(s.colorize(colorYellow, "Type /help for commands, /exit to quit"))
 	s.println("")

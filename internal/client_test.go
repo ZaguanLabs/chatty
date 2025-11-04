@@ -18,7 +18,7 @@ func TestNewClient(t *testing.T) {
 		{"valid key", "test-key", "https://api.example.com", false},
 		{"empty key", "", "https://api.example.com", true},
 		{"whitespace key", "   ", "https://api.example.com", true},
-		{"default url", "test-key", "", false},
+		{"empty url", "test-key", "", true},
 	}
 
 	for _, tt := range tests {
