@@ -79,10 +79,10 @@ model:
   stream: true
 ```
 
-**Anthropic (via compatible proxy):**
+**Anthropic (Direct API):**
 ```yaml
 api:
-  url: "https://api.anthropic-proxy.com/v1"
+  url: "https://api.anthropic.com/v1"
   key: "${CHATTY_API_KEY}"
 model:
   name: "claude-3-5-sonnet-20241022"
@@ -137,17 +137,17 @@ Chatty follows a lean, simple architecture:
 ```
 chatty/
 ├── cmd/chatty/
-│   └── main.go           # Entry point (~45 lines)
+│   └── main.go           # Entry point (~55 lines)
 ├── internal/
 │   ├── config/
-│   │   └── config.go     # Config loading (~127 lines)
-│   ├── client.go         # OpenAI HTTP client (~122 lines)
-│   └── chat.go           # Chat loop + colors (~218 lines)
+│   │   └── config.go     # Config loading (~134 lines)
+│   ├── client.go         # OpenAI HTTP client (~228 lines)
+│   └── chat.go           # Chat loop + colors (~453 lines)
 ├── config.yaml
 └── go.mod
 ```
 
-**Total: ~512 lines of production code**
+**Total: ~870 lines of production code**
 
 ## Development
 
