@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	version = "0.1.2"
-	commit  = ""
-	date    = "2025-11-04"
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 func main() {
@@ -35,8 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create chat session
-	session, err := internal.NewSession(client, cfg, version)
+	// Create chat session with version info
+	versionInfo := version
+	if commit != "none" && commit != "" {
+		versionInfo = fmt.Sprintf("%s (build %s)", version, commit)
+	}
+	session, err := internal.NewSession(client, cfg, versionInfo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create session: %v\n", err)
 		os.Exit(1)
