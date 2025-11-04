@@ -152,78 +152,13 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 
 func (s *Session) streamResponse(ctx context.Context) (string, error) {
 	var fullResponse strings.Builder
-	var buffer strings.Builder
-	inThinking := false
-	thinkingStarted := false
 
-	// Regex patterns for thinking tags
+	// Check if we should stream with thinking tag detection
 	thinkTagPattern := regexp.MustCompile(`<think>|<thinking>`)
-	thinkClosePattern := regexp.MustCompile(`</think>|</thinking>`)
-
+	
+	// Collect all chunks first
 	err := s.client.ChatStream(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature, func(chunk string) error {
 		fullResponse.WriteString(chunk)
-		buffer.WriteString(chunk)
-		bufferStr := buffer.String()
-
-		// Check for opening thinking tags
-		if !inThinking && thinkTagPattern.MatchString(bufferStr) {
-			loc := thinkTagPattern.FindStringIndex(bufferStr)
-			if loc != nil {
-				// Print content before tag
-				beforeTag := bufferStr[:loc[0]]
-				if beforeTag != "" && !thinkingStarted {
-					if s.useColors {
-						fmt.Fprint(s.output, colorGreen)
-					}
-					fmt.Fprint(s.output, beforeTag)
-				}
-				
-				// Switch to thinking mode
-				inThinking = true
-				thinkingStarted = true
-				if s.useColors {
-					fmt.Fprint(s.output, colorReset+styleDim+colorMagenta)
-				}
-				
-				// Print opening tag and content after it
-				afterTag := bufferStr[loc[0]:]
-				fmt.Fprint(s.output, afterTag)
-				buffer.Reset()
-			}
-		} else if inThinking && thinkClosePattern.MatchString(bufferStr) {
-			// Check for closing thinking tags
-			loc := thinkClosePattern.FindStringIndex(bufferStr)
-			if loc != nil {
-				// Print content including closing tag
-				upToAndIncludingTag := bufferStr[:loc[1]]
-				fmt.Fprint(s.output, upToAndIncludingTag)
-				
-				// Switch back to normal mode
-				inThinking = false
-				if s.useColors {
-					fmt.Fprint(s.output, colorReset+colorGreen)
-				}
-				
-				// Print content after closing tag
-				afterTag := bufferStr[loc[1]:]
-				if afterTag != "" {
-					fmt.Fprint(s.output, afterTag)
-				}
-				buffer.Reset()
-			}
-		} else {
-			// Normal streaming - print as we go
-			if !thinkingStarted && !inThinking {
-				if s.useColors {
-					fmt.Fprint(s.output, colorGreen)
-					thinkingStarted = true
-				}
-			}
-			fmt.Fprint(s.output, chunk)
-			buffer.Reset()
-			buffer.WriteString(chunk)
-		}
-		
 		return nil
 	})
 
@@ -231,13 +166,20 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	// Reset colors and add newline
-	if s.useColors {
-		fmt.Fprint(s.output, colorReset)
+	response := fullResponse.String()
+	
+	// Check if response has thinking tags
+	hasThinkingTags := thinkTagPattern.MatchString(response)
+	
+	if hasThinkingTags {
+		// Print with styled thinking tags (no markdown for thinking content)
+		s.printWithThinkingTags(response)
+	} else {
+		// Normal output (with markdown if enabled)
+		s.printAssistant(response)
 	}
-	fmt.Fprintln(s.output)
 
-	return fullResponse.String(), nil
+	return response, nil
 }
 
 func (s *Session) handleCommand(cmd string) (exit bool, err error) {
@@ -313,52 +255,76 @@ func (s *Session) printPrompt() {
 }
 
 func (s *Session) printAssistant(text string) {
-	// Style thinking tags before rendering
-	styledText := s.styleThinkingTags(text)
-	
 	if s.renderMarkdown && s.mdRenderer != nil {
-		// For markdown mode, extract thinking content and render the rest
-		thinkTagPattern := regexp.MustCompile(`<think>|<thinking>`)
-		
-		// If there are thinking tags, handle them specially
-		if thinkTagPattern.MatchString(text) {
-			// Print with styled thinking tags (no markdown rendering for thinking)
-			fmt.Fprintln(s.output, styledText)
-		} else {
-			// Normal markdown rendering
-			rendered, err := s.mdRenderer.Render(text)
-			if err != nil {
-				// Fallback to plain text if rendering fails
-				s.println(s.colorize(colorGreen, text))
-				return
-			}
-			fmt.Fprint(s.output, rendered)
+		// Render markdown
+		rendered, err := s.mdRenderer.Render(text)
+		if err != nil {
+			// Fallback to plain text if rendering fails
+			s.println(s.colorize(colorGreen, text))
+			return
 		}
+		fmt.Fprint(s.output, rendered)
 	} else {
-		// Plain text mode with styled thinking tags
-		s.println(styledText)
+		// Plain text mode
+		s.println(s.colorize(colorGreen, text))
 	}
 }
 
-func (s *Session) styleThinkingTags(text string) string {
-	if !s.useColors {
-		return text
-	}
-	
-	// Replace thinking tags with styled versions
+func (s *Session) printWithThinkingTags(text string) {
+	// Split by thinking tags and print with different colors
 	thinkTagPattern := regexp.MustCompile(`(<think>|<thinking>)([\s\S]*?)(</think>|</thinking>)`)
 	
-	styled := thinkTagPattern.ReplaceAllStringFunc(text, func(match string) string {
-		return styleDim + colorMagenta + match + colorReset + colorGreen
-	})
+	lastEnd := 0
+	matches := thinkTagPattern.FindAllStringSubmatchIndex(text, -1)
 	
-	// Wrap non-thinking content in green
-	if styled != text {
-		// Has thinking tags
-		return colorGreen + styled + colorReset
+	for _, match := range matches {
+		// Print content before thinking tag (should be minimal/none)
+		if match[0] > lastEnd && s.useColors {
+			beforeThinking := text[lastEnd:match[0]]
+			if strings.TrimSpace(beforeThinking) != "" {
+				fmt.Fprint(s.output, colorGreen+beforeThinking+colorReset)
+			}
+		}
+		
+		// Print thinking content in dimmed magenta
+		if s.useColors {
+			fmt.Fprint(s.output, styleDim+colorMagenta+text[match[0]:match[1]]+colorReset)
+		} else {
+			fmt.Fprint(s.output, text[match[0]:match[1]])
+		}
+		
+		lastEnd = match[1]
 	}
 	
-	return colorGreen + text + colorReset
+	// Print remaining content after last thinking tag with markdown rendering
+	if lastEnd < len(text) {
+		finalResponse := text[lastEnd:]
+		if strings.TrimSpace(finalResponse) != "" {
+			// Render the final response with markdown if enabled
+			if s.renderMarkdown && s.mdRenderer != nil {
+				rendered, err := s.mdRenderer.Render(finalResponse)
+				if err != nil {
+					// Fallback to plain text
+					if s.useColors {
+						fmt.Fprintln(s.output, colorGreen+finalResponse+colorReset)
+					} else {
+						fmt.Fprintln(s.output, finalResponse)
+					}
+				} else {
+					fmt.Fprint(s.output, rendered)
+				}
+			} else {
+				// Plain text mode
+				if s.useColors {
+					fmt.Fprintln(s.output, colorGreen+finalResponse+colorReset)
+				} else {
+					fmt.Fprintln(s.output, finalResponse)
+				}
+			}
+		}
+	} else {
+		fmt.Fprintln(s.output)
+	}
 }
 
 func (s *Session) printError(text string) {
