@@ -6,6 +6,7 @@ A dead-simple, blazing-fast terminal chat client for OpenAI-compatible APIs writ
 
 - **Fast startup**: Near-instant launch with minimal overhead
 - **Streaming responses**: Real-time token-by-token output for immediate feedback
+- **Reasoning model support**: Automatically detects and styles thinking tags (`<think>`, `<thinking>`) with dimmed magenta color
 - **Markdown rendering**: Beautiful formatted output with syntax highlighting for code blocks
 - **Simple & clean**: Intuitive command-line interface with ANSI colors
 - **Config-driven**: Loads settings from `config.yaml` with environment overrides
