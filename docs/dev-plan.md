@@ -111,7 +111,7 @@ logging:
 
 ## Implementation Roadmap
 - **Milestone 1: Project bootstrap**
-  - **Create module** `go mod init github.com/PromptShieldLabs/chatty`.
+  - **Create module** `go mod init github.com/ZaguanLabs/chatty`.
   - **Set up CI** (GitHub Actions) running `go test` and lint.
   - **Add basic logging** using `log/slog` or `zerolog`.
 

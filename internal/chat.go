@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PromptShieldLabs/chatty/internal/config"
-	"github.com/PromptShieldLabs/chatty/internal/storage"
+	"github.com/ZaguanLabs/chatty/internal/config"
+	"github.com/ZaguanLabs/chatty/internal/storage"
 	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
 	"golang.org/x/term"

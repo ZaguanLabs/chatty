@@ -1,8 +1,8 @@
 api:
-  # Get your API key from https://promptshield.io
+  # Get your API key from https://zaguanai.com
   # Register for a Founder's Plan.
   # Or use OpenAI API key and set url to "https://api.openai.com/v1"
-  url: "https://api.promptshield.io/v1"
+  url: "https://api.zaguanai.com/v1"
   key: "${CHATTY_API_KEY}"
 model:
   name: "openai/gpt-4o-mini"

@@ -1,4 +1,4 @@
-module github.com/PromptShieldLabs/chatty
+module github.com/ZaguanLabs/chatty
 
 go 1.24.6
 

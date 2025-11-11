@@ -91,8 +91,8 @@ cfg → client → session → run
 All tests pass:
 ```bash
 $ go test ./...
-ok      github.com/PromptShieldLabs/chatty/internal       0.003s
-ok      github.com/PromptShieldLabs/chatty/internal/config   (cached)
+ok      github.com/ZaguanLabs/chatty/internal       0.003s
+ok      github.com/ZaguanLabs/chatty/internal/config   (cached)
 ```
 
 Build succeeds:

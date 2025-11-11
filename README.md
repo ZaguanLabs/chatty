@@ -30,13 +30,13 @@ Chatty eliminates that friction. It's a terminal-based AI chat client that launc
 ### Installation
 
 ```bash
-go install github.com/PromptShieldLabs/chatty/cmd/chatty@latest
+go install github.com/ZaguanLabs/chatty/cmd/chatty@latest
 ```
 
 Alternatively, clone the repository and build locally:
 
 ```bash
-git clone https://github.com/PromptShieldLabs/chatty.git
+git clone https://github.com/ZaguanLabs/chatty.git
 cd chatty
 go build ./cmd/chatty
 ```
@@ -44,7 +44,7 @@ go build ./cmd/chatty
 Or use the provided Makefile for convenience:
 
 ```bash
-git clone https://github.com/PromptShieldLabs/chatty.git
+git clone https://github.com/ZaguanLabs/chatty.git
 cd chatty
 make build
 ```
@@ -53,13 +53,13 @@ make build
 
 Chatty works with any OpenAI-compatible API provider. Create `config.yaml` in the project root or pass `--config` to specify a path.
 
-#### Using PromptShield
+#### Using Zaguán
 
-[PromptShield](https://promptshield.io) provides access to multiple AI models through a unified API:
+[Zaguán](https://zaguanai.com) provides access to multiple AI models through a unified API:
 
 ```yaml
 api:
-  url: "https://api.promptshield.io/v1"
+  url: "https://api.zaguanai.com/v1"
   key: "${CHATTY_API_KEY}"
 model:
   name: "openai/gpt-4o-mini"
@@ -174,6 +174,64 @@ chatty/
 - Build: `make build`
 - Install: `make install`
 - Format: `go fmt ./...`
+
+### Cross-Platform Builds
+
+Build for all supported platforms:
+```bash
+make build-all
+```
+
+Or build for specific platforms:
+```bash
+make build-linux    # Linux amd64 and arm64
+make build-macos    # macOS arm64
+make build-windows  # Windows amd64 and arm64
+```
+
+Binaries are created in the `dist/` directory with platform-specific names:
+- `chatty-linux-amd64`
+- `chatty-linux-arm64`
+- `chatty-macos-arm64`
+- `chatty-windows-amd64.exe`
+- `chatty-windows-arm64.exe`
+
+### Release Builds
+
+For production releases with optimized, stripped binaries (~28% smaller):
+```bash
+make build-release
+```
+
+This creates stripped binaries (using `-ldflags="-s -w"`) that are smaller and suitable for distribution.
+
+### Creating a Release
+
+Use the interactive release command:
+```bash
+make release
+```
+
+This will:
+- Run all tests
+- Prompt for documentation updates
+- Validate version format
+- Create an annotated git tag
+- Show instructions for pushing
+
+Then push the tag to trigger the automated release:
+```bash
+git push origin v0.x.x
+```
+
+Alternatively, use `make tag` to skip the test/checklist steps.
+
+The GitHub Actions workflow will automatically:
+- Build stripped binaries for all platforms
+- Create release archives (`.tar.gz` for Unix, `.zip` for Windows)
+- Include `LICENSE`, `README.md`, and `config.example.yaml` in each archive
+- Generate SHA256 checksums
+- Create a GitHub release with all artifacts
 
 ## License
 

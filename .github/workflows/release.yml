@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
+      - name: Build all platforms
+        env:
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
+        run: |
+          # Build for all platforms
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/chatty-linux-amd64 ./cmd/chatty
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/chatty-linux-arm64 ./cmd/chatty
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/chatty-macos-arm64 ./cmd/chatty
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/chatty-windows-amd64.exe ./cmd/chatty
+          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/chatty-windows-arm64.exe ./cmd/chatty
+
+      - name: Create release archives
+        run: |
+          mkdir -p release
+          
+          # Linux amd64
+          tar -czf release/chatty-${VERSION}-linux-amd64.tar.gz \
+            -C dist chatty-linux-amd64 \
+            -C .. LICENSE README.md config.example.yaml
+          
+          # Linux arm64
+          tar -czf release/chatty-${VERSION}-linux-arm64.tar.gz \
+            -C dist chatty-linux-arm64 \
+            -C .. LICENSE README.md config.example.yaml
+          
+          # macOS arm64
+          tar -czf release/chatty-${VERSION}-macos-arm64.tar.gz \
+            -C dist chatty-macos-arm64 \
+            -C .. LICENSE README.md config.example.yaml
+          
+          # Windows amd64
+          zip -j release/chatty-${VERSION}-windows-amd64.zip \
+            dist/chatty-windows-amd64.exe \
+            LICENSE \
+            README.md \
+            config.example.yaml
+          
+          # Windows arm64
+          zip -j release/chatty-${VERSION}-windows-arm64.zip \
+            dist/chatty-windows-arm64.exe \
+            LICENSE \
+            README.md \
+            config.example.yaml
+        env:
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/checksums.txt
+          body: |
+            ## Chatty ${{ steps.get_version.outputs.VERSION }}
+            
+            ### Installation
+            
+            1. Download the appropriate archive for your platform
+            2. Extract the archive
+            3. Copy `config.example.yaml` to `config.yaml` and configure your API settings
+            4. Run the binary
+            
+            ### Supported Platforms
+            - Linux (amd64, arm64)
+            - macOS (arm64)
+            - Windows (amd64, arm64)
+            
+            ### Archive Contents
+            Each archive includes:
+            - The chatty binary
+            - LICENSE
+            - README.md
+            - config.example.yaml
+            
+            ### Verify Downloads
+            Use the `checksums.txt` file to verify the integrity of your download:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+            
+            ### What's Changed
+            See the commit history for details.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

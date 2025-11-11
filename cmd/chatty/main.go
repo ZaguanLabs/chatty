@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/PromptShieldLabs/chatty/internal"
-	"github.com/PromptShieldLabs/chatty/internal/config"
-	"github.com/PromptShieldLabs/chatty/internal/storage"
+	"github.com/ZaguanLabs/chatty/internal"
+	"github.com/ZaguanLabs/chatty/internal/config"
+	"github.com/ZaguanLabs/chatty/internal/storage"
 )
 
 var (
-	version = "0.1.5"
+	version = "0.3.0"
 	commit  = "none"
 	date    = "unknown"
 )
