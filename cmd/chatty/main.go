@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ZaguanLabs/chatty/internal"
 	"github.com/ZaguanLabs/chatty/internal/config"
@@ -48,9 +49,11 @@ func main() {
 	}
 
 	// Create chat session with version info
-	versionInfo := version
+	// Strip leading 'v' from version if present (e.g., "v0.3.0" -> "0.3.0")
+	cleanVersion := strings.TrimPrefix(version, "v")
+	versionInfo := cleanVersion
 	if commit != "none" && commit != "" {
-		versionInfo = fmt.Sprintf("%s (build %s)", version, commit)
+		versionInfo = fmt.Sprintf("%s (build %s)", cleanVersion, commit)
 	}
 	session, err := internal.NewSession(client, cfg, store, versionInfo)
 	if err != nil {
