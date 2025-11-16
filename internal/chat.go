@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ZaguanLabs/chatty/internal/config"
@@ -18,6 +19,145 @@ import (
 	"github.com/peterh/liner"
 	"golang.org/x/term"
 )
+
+// Global markdown renderer singleton to avoid repeated initialization overhead
+var (
+	mdRenderer     *glamour.TermRenderer
+	mdRendererInit sync.Once
+	mdRendererErr  error
+)
+
+// initMarkdownRenderer initializes the global markdown renderer once.
+func initMarkdownRenderer() {
+	mdRenderer, mdRendererErr = glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(100),
+	)
+}
+
+// getMarkdownRenderer returns the global markdown renderer, initializing it if needed.
+func getMarkdownRenderer() (*glamour.TermRenderer, error) {
+	mdRendererInit.Do(initMarkdownRenderer)
+	return mdRenderer, mdRendererErr
+}
+
+// CommandHandler defines the interface for command handlers.
+type CommandHandler func(ctx context.Context, parts []string) (exit bool, err error)
+
+// CommandRegistry maps command names to their handlers and help text.
+type CommandRegistry struct {
+	aliases    []string
+	handler    CommandHandler
+	helpText   string
+	minArgs    int
+	usage      string
+}
+
+// Command definitions for easy extensibility.
+var commandRegistry = map[string]CommandRegistry{
+	"exit": {
+		aliases:  []string{"/exit", "/quit"},
+		helpText: "Exit the chat",
+		minArgs:  0,
+	},
+	"reset": {
+		aliases:  []string{"/reset", "/clear"},
+		helpText: "Clear conversation history",
+		minArgs:  0,
+	},
+	"help": {
+		aliases:  []string{"/help"},
+		helpText: "Show available commands",
+		minArgs:  0,
+	},
+	"history": {
+		aliases:  []string{"/history"},
+		helpText: "Show conversation history",
+		minArgs:  0,
+	},
+	"markdown": {
+		aliases:  []string{"/markdown"},
+		helpText: "Toggle markdown rendering",
+		minArgs:  0,
+	},
+	"list": {
+		aliases:  []string{"/list", "/sessions"},
+		helpText: "Show saved conversations",
+		minArgs:  0,
+	},
+	"load": {
+		aliases:  []string{"/load"},
+		helpText: "Load a saved conversation",
+		minArgs:  1,
+		usage:    "/load <session-id>",
+	},
+}
+
+// initializeCommandHandlers sets up the command handlers.
+func (s *Session) initializeCommandHandlers() map[string]CommandHandler {
+	return map[string]CommandHandler{
+		"exit": func(ctx context.Context, parts []string) (exit bool, err error) {
+			s.println(s.colorize(colorYellow, "Goodbye!"))
+			return true, nil
+		},
+		"reset": func(ctx context.Context, parts []string) (exit bool, err error) {
+			s.history = s.history[:0]
+			s.sessionID = 0
+			s.println(s.colorize(colorYellow, "History cleared."))
+			return false, nil
+		},
+		"help": func(ctx context.Context, parts []string) (exit bool, err error) {
+			s.printHelp()
+			return false, nil
+		},
+		"history": func(ctx context.Context, parts []string) (exit bool, err error) {
+			s.printHistory()
+			return false, nil
+		},
+		"markdown": func(ctx context.Context, parts []string) (exit bool, err error) {
+			s.renderMarkdown = !s.renderMarkdown
+			status := "enabled"
+			if !s.renderMarkdown {
+				status = "disabled"
+			}
+			s.println(s.colorize(colorYellow, fmt.Sprintf("Markdown rendering %s.", status)))
+			return false, nil
+		},
+		"list": func(ctx context.Context, parts []string) (exit bool, err error) {
+			if err := s.handleListSessions(ctx); err != nil {
+				return false, err
+			}
+			return false, nil
+		},
+		"load": func(ctx context.Context, parts []string) (exit bool, err error) {
+			if len(parts) < 2 {
+				return false, errors.New("usage: /load <session-id>")
+			}
+
+			id, convErr := strconv.ParseInt(parts[1], 10, 64)
+			if convErr != nil {
+				return false, fmt.Errorf("invalid session id %q", parts[1])
+			}
+
+			if err := s.handleLoadSession(ctx, id); err != nil {
+				return false, err
+			}
+			return false, nil
+		},
+	}
+}
+
+// findCommand finds a command by its alias.
+func findCommand(alias string) (string, *CommandRegistry) {
+	for cmd, reg := range commandRegistry {
+		for _, cmdAlias := range reg.aliases {
+			if alias == cmdAlias {
+				return cmd, &reg
+			}
+		}
+	}
+	return "", nil
+}
 
 // ANSI color codes and styles for terminal output
 const (
@@ -42,7 +182,6 @@ type Session struct {
 	output         io.Writer
 	useColors      bool
 	version        string
-	mdRenderer     *glamour.TermRenderer
 	renderMarkdown bool
 	lineReader     *liner.State
 }
@@ -56,15 +195,6 @@ func NewSession(client *Client, cfg *config.Config, store *storage.Store, versio
 		return nil, errors.New("config cannot be nil")
 	}
 
-	// Initialize markdown renderer with dark style
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(100),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create markdown renderer: %w", err)
-	}
-
 	return &Session{
 		client:         client,
 		config:         cfg,
@@ -74,7 +204,6 @@ func NewSession(client *Client, cfg *config.Config, store *storage.Store, versio
 		output:         os.Stdout,
 		useColors:      true,
 		version:        version,
-		mdRenderer:     renderer,
 		renderMarkdown: true,
 	}, nil
 }
@@ -361,7 +490,11 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 				inThinking = true
 				thinkingStarted = true
 				if s.useColors {
-					fmt.Fprint(s.output, colorReset+styleDim+colorMagenta)
+					var buf strings.Builder
+					buf.WriteString(colorReset)
+					buf.WriteString(styleDim)
+					buf.WriteString(colorMagenta)
+					fmt.Fprint(s.output, buf.String())
 				}
 
 				// Print opening tag and content after it
@@ -422,14 +555,19 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 	fmt.Fprintln(s.output)
 
 	// If we collected content after thinking tags AND markdown is enabled, re-render with markdown
-	if thinkingClosed && afterThinkingContent.Len() > 0 && s.renderMarkdown && s.mdRenderer != nil {
-		finalContent := strings.TrimSpace(afterThinkingContent.String())
-		if finalContent != "" {
-			rendered, err := s.mdRenderer.Render(finalContent)
-			if err == nil {
-				// Print a separator and the markdown-rendered version
-				fmt.Fprintln(s.output, s.colorize(styleDim+colorYellow, "─── Formatted Response ───"))
-				fmt.Fprint(s.output, rendered)
+	if thinkingClosed && afterThinkingContent.Len() > 0 && s.renderMarkdown {
+		renderer, err := getMarkdownRenderer()
+		if err != nil {
+			s.printError(fmt.Sprintf("Failed to initialize markdown renderer: %v", err))
+		} else {
+			finalContent := strings.TrimSpace(afterThinkingContent.String())
+			if finalContent != "" {
+				rendered, err := renderer.Render(finalContent)
+				if err == nil {
+					// Print a separator and the markdown-rendered version
+					fmt.Fprintln(s.output, s.colorize(styleDim+colorYellow, "─── Formatted Response ───"))
+					fmt.Fprint(s.output, rendered)
+				}
 			}
 		}
 	} else if !thinkingStarted {
@@ -447,58 +585,29 @@ func (s *Session) handleCommand(ctx context.Context, cmd string) (exit bool, err
 		return false, nil
 	}
 
-	switch parts[0] {
-	case "/exit", "/quit":
-		s.println(s.colorize(colorYellow, "Goodbye!"))
-		return true, nil
+	handlers := s.initializeCommandHandlers()
+	commandName, reg := findCommand(parts[0])
 
-	case "/reset", "/clear":
-		s.history = s.history[:0]
-		s.sessionID = 0
-		s.println(s.colorize(colorYellow, "History cleared."))
-		return false, nil
-
-	case "/help":
-		s.printHelp()
-		return false, nil
-
-	case "/history":
-		s.printHistory()
-		return false, nil
-
-	case "/markdown":
-		s.renderMarkdown = !s.renderMarkdown
-		status := "enabled"
-		if !s.renderMarkdown {
-			status = "disabled"
-		}
-		s.println(s.colorize(colorYellow, fmt.Sprintf("Markdown rendering %s.", status)))
-		return false, nil
-
-	case "/list", "/sessions":
-		if err := s.handleListSessions(ctx); err != nil {
-			return false, err
-		}
-		return false, nil
-
-	case "/load":
-		if len(parts) < 2 {
-			return false, errors.New("usage: /load <session-id>")
-		}
-
-		id, convErr := strconv.ParseInt(parts[1], 10, 64)
-		if convErr != nil {
-			return false, fmt.Errorf("invalid session id %q", parts[1])
-		}
-
-		if err := s.handleLoadSession(ctx, id); err != nil {
-			return false, err
-		}
-		return false, nil
-
-	default:
-		return false, fmt.Errorf("unknown command %q. Try /help", cmd)
+	if commandName == "" {
+		return false, fmt.Errorf("unknown command %q. Try /help", parts[0])
 	}
+
+	// Validate minimum arguments
+	if len(parts) < reg.minArgs+1 { // +1 because parts[0] is the command itself
+		usageText := ""
+		if reg.usage != "" {
+			usageText = fmt.Sprintf(" (usage: %s)", reg.usage)
+		}
+		return false, fmt.Errorf("command %q requires at least %d arguments%s", parts[0], reg.minArgs, usageText)
+	}
+
+	// Execute command handler
+	handler, exists := handlers[commandName]
+	if !exists {
+		return false, fmt.Errorf("handler not found for command %q", commandName)
+	}
+
+	return handler(ctx, parts)
 }
 
 func (s *Session) printWelcome() {
@@ -509,15 +618,70 @@ func (s *Session) printWelcome() {
 }
 
 func (s *Session) printHelp() {
-	help := `Available commands:
-  /help     - Show this help message
-  /exit     - Exit the chat
-  /reset    - Clear conversation history
-  /history  - Show conversation history
-  /markdown - Toggle markdown rendering
-  /list     - Show saved conversations
-  /load ID  - Load a saved conversation`
-	s.println(s.colorize(colorYellow, help))
+	var buf strings.Builder
+	buf.WriteString(s.colorize(colorYellow, "Available commands:"))
+	buf.WriteString("\n")
+
+	// Group commands by category for better organization
+	type HelpEntry struct {
+		command  string
+		aliases  []string
+		helpText string
+		usage    string
+	}
+
+	var helpEntries []HelpEntry
+	for _, reg := range commandRegistry {
+		// Get primary command name (first alias without slash)
+		var primaryCmd string
+		for _, alias := range reg.aliases {
+			if !strings.HasPrefix(alias, "/") {
+				primaryCmd = alias
+				break
+			}
+		}
+		if primaryCmd == "" && len(reg.aliases) > 0 {
+			primaryCmd = reg.aliases[0]
+		}
+
+		helpEntries = append(helpEntries, HelpEntry{
+			command:  primaryCmd,
+			aliases:  reg.aliases,
+			helpText: reg.helpText,
+			usage:    reg.usage,
+		})
+	}
+
+	// Sort commands alphabetically
+	for i := 0; i < len(helpEntries); i++ {
+		for j := i + 1; j < len(helpEntries); j++ {
+			if helpEntries[i].command > helpEntries[j].command {
+				helpEntries[i], helpEntries[j] = helpEntries[j], helpEntries[i]
+			}
+		}
+	}
+
+	for _, entry := range helpEntries {
+		var cmdBuf strings.Builder
+		cmdBuf.WriteString("  ")
+		cmdBuf.WriteString(s.colorize(colorCyan, entry.aliases[0]))
+		if len(entry.aliases) > 1 {
+			for i := 1; i < len(entry.aliases); i++ {
+				cmdBuf.WriteString(", ")
+				cmdBuf.WriteString(entry.aliases[i])
+			}
+		}
+		cmdBuf.WriteString(" - ")
+		cmdBuf.WriteString(entry.helpText)
+		if entry.usage != "" {
+			cmdBuf.WriteString("\n    ")
+			cmdBuf.WriteString(s.colorize(styleDim, fmt.Sprintf("Usage: %s", entry.usage)))
+		}
+		buf.WriteString(cmdBuf.String())
+		buf.WriteString("\n")
+	}
+
+	s.println(buf.String())
 }
 
 func (s *Session) printHistory() {
@@ -534,7 +698,15 @@ func (s *Session) printHistory() {
 			prefix = "AI"
 			color = colorGreen
 		}
-		s.println(fmt.Sprintf("%s[%d] %s:%s %s", s.colorize(colorYellow, ""), i+1, prefix, colorReset, s.colorize(color, msg.Content)))
+
+		var buf strings.Builder
+		buf.WriteString(s.colorize(colorYellow, ""))
+		buf.WriteString(fmt.Sprintf("[%d] %s:", i+1, prefix))
+		buf.WriteString(colorReset)
+		buf.WriteString(" ")
+		buf.WriteString(s.colorize(color, msg.Content))
+
+		s.println(buf.String())
 	}
 }
 
@@ -543,9 +715,15 @@ func (s *Session) printPrompt() {
 }
 
 func (s *Session) printAssistant(text string) {
-	if s.renderMarkdown && s.mdRenderer != nil {
+	if s.renderMarkdown {
+		renderer, err := getMarkdownRenderer()
+		if err != nil {
+			// Failed to get renderer, fallback to plain text
+			s.println(s.colorize(colorGreen, text))
+			return
+		}
 		// Render markdown
-		rendered, err := s.mdRenderer.Render(text)
+		rendered, err := renderer.Render(text)
 		if err != nil {
 			// Fallback to plain text if rendering fails
 			s.println(s.colorize(colorGreen, text))
@@ -570,13 +748,22 @@ func (s *Session) printWithThinkingTags(text string) {
 		if match[0] > lastEnd && s.useColors {
 			beforeThinking := text[lastEnd:match[0]]
 			if strings.TrimSpace(beforeThinking) != "" {
-				fmt.Fprint(s.output, colorGreen+beforeThinking+colorReset)
+				var buf strings.Builder
+				buf.WriteString(colorGreen)
+				buf.WriteString(beforeThinking)
+				buf.WriteString(colorReset)
+				fmt.Fprint(s.output, buf.String())
 			}
 		}
 
 		// Print thinking content in dimmed magenta
 		if s.useColors {
-			fmt.Fprint(s.output, styleDim+colorMagenta+text[match[0]:match[1]]+colorReset)
+			var buf strings.Builder
+			buf.WriteString(styleDim)
+			buf.WriteString(colorMagenta)
+			buf.WriteString(text[match[0]:match[1]])
+			buf.WriteString(colorReset)
+			fmt.Fprint(s.output, buf.String())
 		} else {
 			fmt.Fprint(s.output, text[match[0]:match[1]])
 		}
@@ -589,22 +776,44 @@ func (s *Session) printWithThinkingTags(text string) {
 		finalResponse := text[lastEnd:]
 		if strings.TrimSpace(finalResponse) != "" {
 			// Render the final response with markdown if enabled
-			if s.renderMarkdown && s.mdRenderer != nil {
-				rendered, err := s.mdRenderer.Render(finalResponse)
+			if s.renderMarkdown {
+				renderer, err := getMarkdownRenderer()
 				if err != nil {
-					// Fallback to plain text
+					// Failed to get renderer, fallback to plain text
 					if s.useColors {
-						fmt.Fprintln(s.output, colorGreen+finalResponse+colorReset)
+						var buf strings.Builder
+						buf.WriteString(colorGreen)
+						buf.WriteString(finalResponse)
+						buf.WriteString(colorReset)
+						fmt.Fprintln(s.output, buf.String())
 					} else {
 						fmt.Fprintln(s.output, finalResponse)
 					}
 				} else {
-					fmt.Fprint(s.output, rendered)
+					rendered, err := renderer.Render(finalResponse)
+					if err != nil {
+						// Fallback to plain text
+						if s.useColors {
+							var buf strings.Builder
+							buf.WriteString(colorGreen)
+							buf.WriteString(finalResponse)
+							buf.WriteString(colorReset)
+							fmt.Fprintln(s.output, buf.String())
+						} else {
+							fmt.Fprintln(s.output, finalResponse)
+						}
+					} else {
+						fmt.Fprint(s.output, rendered)
+					}
 				}
 			} else {
 				// Plain text mode
 				if s.useColors {
-					fmt.Fprintln(s.output, colorGreen+finalResponse+colorReset)
+					var buf strings.Builder
+					buf.WriteString(colorGreen)
+					buf.WriteString(finalResponse)
+					buf.WriteString(colorReset)
+					fmt.Fprintln(s.output, buf.String())
 				} else {
 					fmt.Fprintln(s.output, finalResponse)
 				}
@@ -627,7 +836,11 @@ func (s *Session) colorize(color, text string) string {
 	if !s.useColors {
 		return text
 	}
-	return color + text + colorReset
+	var buf strings.Builder
+	buf.WriteString(color)
+	buf.WriteString(text)
+	buf.WriteString(colorReset)
+	return buf.String()
 }
 
 // SetIO overrides input/output streams (useful for testing).

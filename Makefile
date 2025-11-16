@@ -6,12 +6,26 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
-LDFLAGS_RELEASE := -s -w $(LDFLAGS)
+LDFLAGS_RELEASE := -s -w -buildid= $(LDFLAGS)
+LDFLAGS_RACE := -race $(LDFLAGS)
+LDFLAGS_TRIM := -trimpath $(LDFLAGS)
+LDFLAGS_OPTIMIZED := -trimpath -ldflags "-s -w" $(LDFLAGS)
 BINARY_NAME := chatty
 BUILD_DIR := dist
 
+# Optimization flags for development builds
+GOFLAGS := -trimpath
+
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/chatty
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/chatty
+
+# Build with race condition detection for testing
+build-race:
+	go build -race -ldflags "$(LDFLAGS_RACE)" -o $(BINARY_NAME) ./cmd/chatty
+
+# Build with all optimizations enabled
+build-optimized:
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS_OPTIMIZED)" -o $(BINARY_NAME) ./cmd/chatty
 
 # Build for all platforms
 build-all: build-linux build-macos build-windows
@@ -22,12 +36,12 @@ build-linux: build-linux-amd64 build-linux-arm64
 
 build-linux-amd64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/chatty
+	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/chatty
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
 
 build-linux-arm64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/chatty
+	GOOS=linux GOARCH=arm64 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/chatty
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64"
 
 # macOS builds
@@ -35,7 +49,7 @@ build-macos: build-macos-arm64
 
 build-macos-arm64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-macos-arm64 ./cmd/chatty
+	GOOS=darwin GOARCH=arm64 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-macos-arm64 ./cmd/chatty
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)-macos-arm64"
 
 # Windows builds
@@ -43,12 +57,12 @@ build-windows: build-windows-amd64 build-windows-arm64
 
 build-windows-amd64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/chatty
+	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/chatty
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe"
 
 build-windows-arm64:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=windows GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe ./cmd/chatty
+	GOOS=windows GOARCH=arm64 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe ./cmd/chatty
 	@echo "Built: $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe"
 
 # Release builds (stripped binaries for smaller size)
@@ -89,7 +103,15 @@ build-release-windows-arm64:
 	@echo "Built (stripped): $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe"
 
 test:
-	go test ./...
+	go test -race -coverprofile=coverage.out ./...
+
+# Run tests with race detection for thorough testing
+test-race:
+	go test -race -coverprofile=coverage-race.out ./...
+
+# Run tests with memory profiling
+test-profile:
+	go test -memprofile=mem.prof -cpuprofile=cpu.prof ./...
 
 clean:
 	rm -f $(BINARY_NAME)
@@ -106,7 +128,7 @@ version:
 	@echo "Commit:  $(COMMIT)"
 	@echo "Date:    $(DATE)"
 
-release: test
+release: test compress-release
 	@echo "=== Release Checklist ==="
 	@echo ""
 	@echo "Current version: $(VERSION)"
@@ -114,6 +136,7 @@ release: test
 	@echo ""
 	@echo "Pre-release checks:"
 	@echo "  ✓ Tests passed"
+	@echo "  ✓ Binaries compressed with upx"
 	@echo ""
 	@read -p "Have you updated CHANGELOG/docs? (y/n): " updated; \
 	if [ "$$updated" != "y" ]; then \
@@ -142,6 +165,14 @@ release: test
 	echo "  1. Push the tag:    git push origin $$new_version"; \
 	echo "  2. GitHub Actions will automatically build and create the release"; \
 	echo "  3. View releases:   https://github.com/ZaguanLabs/chatty/releases"
+
+compress-release: build-release
+	@if command -v upx >/dev/null; then \
+		echo "Compressing release binaries with upx..."; \
+		upx --best --lzma $(BUILD_DIR)/$(BINARY_NAME)-*; \
+	else \
+		echo "Warning: upx not found, skipping binary compression"; \
+	fi
 
 tag:
 	@echo "Current version: $(VERSION)"

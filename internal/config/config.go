@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -106,18 +107,71 @@ func applyEnvOverrides(cfg *Config) {
 }
 
 func (c *Config) validate() error {
+	var validationErrors []string
+
+	// API URL validation
 	if strings.TrimSpace(c.API.URL) == "" {
-		return errors.New("api.url must be set")
+		validationErrors = append(validationErrors, "API URL (api.url) must be configured")
+	} else {
+		if !strings.HasPrefix(c.API.URL, "http://") && !strings.HasPrefix(c.API.URL, "https://") {
+			validationErrors = append(validationErrors, "API URL must start with http:// or https://")
+		} else {
+			if _, parseErr := url.Parse(c.API.URL); parseErr != nil {
+				validationErrors = append(validationErrors, fmt.Sprintf("API URL is invalid: %v", parseErr))
+			}
+		}
 	}
+
+	// API Key validation
 	if strings.Contains(c.API.Key, "${") {
-		return errors.New("api.key contains unexpanded environment variable, set CHATTY_API_KEY or replace in config")
+		validationErrors = append(validationErrors, "API key contains unexpanded environment variable, set CHATTY_API_KEY environment variable or replace ${...} in config")
 	}
 	if strings.TrimSpace(c.API.Key) == "" {
-		return errors.New("api.key must be set or CHATTY_API_KEY provided")
+		validationErrors = append(validationErrors, "API key (api.key) must be set or CHATTY_API_KEY environment variable must be provided")
 	}
-	if c.Model.Temperature < 0 || c.Model.Temperature > 2 {
-		return fmt.Errorf("model.temperature must be between 0 and 2, got %f", c.Model.Temperature)
+
+	// Model validation
+	if strings.TrimSpace(c.Model.Name) == "" {
+		validationErrors = append(validationErrors, "Model name (model.name) cannot be empty")
+	} else if len(c.Model.Name) > 200 {
+		validationErrors = append(validationErrors, "Model name (model.name) exceeds maximum length of 200 characters")
 	}
+
+	// Temperature validation
+	if c.Model.Temperature < 0.0 || c.Model.Temperature > 2.0 {
+		validationErrors = append(validationErrors, fmt.Sprintf("Model temperature (model.temperature) must be between 0.0 and 2.0, got %.2f", c.Model.Temperature))
+	}
+
+	// Logging level validation
+	validLevels := []string{"debug", "info", "warn", "error", "fatal"}
+	if strings.TrimSpace(c.Logging.Level) == "" {
+		validationErrors = append(validationErrors, "Logging level (logging.level) cannot be empty")
+	} else {
+		isValidLevel := false
+		for _, validLevel := range validLevels {
+			if strings.EqualFold(c.Logging.Level, validLevel) {
+				isValidLevel = true
+				break
+			}
+		}
+		if !isValidLevel {
+			validationErrors = append(validationErrors, fmt.Sprintf("Logging level (logging.level) must be one of: %v, got %s", validLevels, c.Logging.Level))
+		}
+	}
+
+	// Storage path validation
+	if strings.TrimSpace(c.Storage.Path) != "" {
+		if info, statErr := os.Stat(c.Storage.Path); statErr == nil {
+			if !info.IsDir() {
+				validationErrors = append(validationErrors, fmt.Sprintf("Storage path (%s) must be a directory, not a file", c.Storage.Path))
+			}
+		}
+	}
+
+	if len(validationErrors) > 0 {
+		return fmt.Errorf("configuration validation failed:\n\t• %s", strings.Join(validationErrors, "\n\t• "))
+	}
+
 	return nil
 }
 
