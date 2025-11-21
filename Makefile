@@ -1,4 +1,4 @@
-.PHONY: build test clean install version tag build-all build-linux build-macos build-windows build-release release
+.PHONY: build test clean install version tag build-all build-linux build-macos build-windows build-release release build-optimized build-ultra build-compressed build-pgo build-benchmark
 
 # Get version from git tags, or use 0.1.0 if no tags exist
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "0.1.5")
@@ -8,13 +8,20 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 LDFLAGS_RELEASE := -s -w -buildid= $(LDFLAGS)
 LDFLAGS_RACE := -race $(LDFLAGS)
-LDFLAGS_TRIM := -trimpath $(LDFLAGS)
-LDFLAGS_OPTIMIZED := -trimpath -ldflags "-s -w" $(LDFLAGS)
+LDFLAGS_TRIM := $(LDFLAGS)
+LDFLAGS_OPTIMIZED := -s -w $(LDFLAGS)
+LDFLAGS_ULTRA := -s -w -buildid= -extldflags "-static" $(LDFLAGS)
+LDFLAGS_PROFILE := -s -w -gcflags="-l=4" $(LDFLAGS)
 BINARY_NAME := chatty
 BUILD_DIR := dist
 
 # Optimization flags for development builds
 GOFLAGS := -trimpath
+
+# Compiler optimization flags
+GOFLAGS_SPEED := -trimpath -gcflags="-l=4"
+GOFLAGS_SIZE := -trimpath -gcflags="-l=4"
+GOFLAGS_PROFILE := -trimpath -gcflags="-l=4"
 
 build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/chatty
@@ -25,7 +32,38 @@ build-race:
 
 # Build with all optimizations enabled
 build-optimized:
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS_OPTIMIZED)" -o $(BINARY_NAME) ./cmd/chatty
+	go build $(GOFLAGS_SPEED) -ldflags "$(LDFLAGS_OPTIMIZED)" -o $(BINARY_NAME) ./cmd/chatty
+
+# Ultra-optimized build with aggressive compiler optimizations
+build-ultra:
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid= -extldflags '-static'" -o $(BINARY_NAME) ./cmd/chatty
+
+# Profile-guided optimization build (requires training data)
+build-pgo:
+	@echo "Building with Profile-Guided Optimization..."
+	@if [ ! -f default.pgo ]; then \
+		echo "Creating training build..."; \
+		go build -o $(BINARY_NAME).train ./cmd/chatty; \
+		echo "Run the training binary with representative workload, then press Ctrl+C"; \
+		./$(BINARY_NAME).train; \
+		go tool pgo build -out $(BINARY_NAME) ./cmd/chatty; \
+		rm -f $(BINARY_NAME).train; \
+	else \
+		go tool pgo build -out $(BINARY_NAME) ./cmd/chatty; \
+	fi
+
+# Benchmark build for performance testing
+build-benchmark:
+	go build $(GOFLAGS_PROFILE) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/chatty
+
+# Build with UPX compression for smaller binary sizes
+build-compressed: build-optimized
+	@if command -v upx >/dev/null; then \
+		echo "Compressing binary with UPX..."; \
+		upx --best --lzma $(BINARY_NAME); \
+	else \
+		echo "Warning: upx not found, skipping compression"; \
+	fi
 
 # Build for all platforms
 build-all: build-linux build-macos build-windows

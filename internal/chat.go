@@ -15,6 +15,8 @@ import (
 
 	"github.com/ZaguanLabs/chatty/internal/config"
 	"github.com/ZaguanLabs/chatty/internal/storage"
+	"github.com/ZaguanLabs/chatty/internal/ui"
+	"github.com/ZaguanLabs/chatty/internal/validation"
 	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
 	"golang.org/x/term"
@@ -25,14 +27,95 @@ var (
 	mdRenderer     *glamour.TermRenderer
 	mdRendererInit sync.Once
 	mdRendererErr  error
+
+	// Cached regex patterns for thinking tags
+	thinkTagPattern     *regexp.Regexp
+	thinkClosePattern   *regexp.Regexp
+	patternInit         sync.Once
 )
+
+// initThinkingPatterns initializes regex patterns for detecting thinking tags
+func initThinkingPatterns() {
+	thinkTagPattern = regexp.MustCompile(`(<thinking>)|(\\u0060\\u0060\\u0060)`)
+	thinkClosePattern = regexp.MustCompile(`(</thinking>)|(\\u0060\\u0060\\u0060)`)
+}
 
 // initMarkdownRenderer initializes the global markdown renderer once.
 func initMarkdownRenderer() {
+	// Use fixed dark style instead of WithAutoStyle to avoid terminal background detection
 	mdRenderer, mdRendererErr = glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStylePath("dark"),
 		glamour.WithWordWrap(100),
 	)
+}
+
+// enhanceCodeBlocks processes markdown-rendered text to add enhanced styling to code blocks
+func (s *Session) enhanceCodeBlocks(renderedText string) string {
+	// Simple approach: wrap code blocks with enhanced borders when detected
+	lines := strings.Split(renderedText, "\n")
+	var enhanced strings.Builder
+
+	inCodeBlock := false
+	codeBlockLang := ""
+	codeLineCount := 0
+
+	for _, line := range lines {
+		// Check for code block start (language specification)
+		if strings.HasPrefix(line, "```") && !inCodeBlock {
+			inCodeBlock = true
+			codeLineCount = 0
+
+			// Extract language if specified
+			codeBlockLang = strings.TrimSpace(strings.TrimPrefix(line, "```"))
+
+			// Create enhanced code block header using UI functions
+			emoji := ui.GetLanguageEmoji(codeBlockLang)
+			if codeBlockLang != "" {
+				enhanced.WriteString(ui.BorderGray + "┌─ " + emoji + " " + codeBlockLang + " " + strings.Repeat("─", s.getContentWidth()-len(codeBlockLang)-len(emoji)-5) + "┐" + ui.Reset + "\n")
+			} else {
+				enhanced.WriteString(ui.BorderGray + "┌─ Code Block " + strings.Repeat("─", s.getContentWidth()-15) + "┐" + ui.Reset + "\n")
+			}
+			enhanced.WriteString(ui.BGGray + ui.BorderGray + "│" + ui.Reset + "\n")
+			continue
+		}
+
+		// Check for code block end
+		if strings.HasPrefix(line, "```") && inCodeBlock {
+			inCodeBlock = false
+			codeLineCount++
+
+			// Close the code block
+			enhanced.WriteString(ui.BGGray + ui.BorderGray + "│" + ui.Reset + "\n")
+			if codeBlockLang != "" {
+				enhanced.WriteString(ui.BorderGray + "└" + strings.Repeat("─", s.getContentWidth()-2) + "┘" + ui.Reset + "\n")
+			} else {
+				enhanced.WriteString(ui.BorderGray + "└" + strings.Repeat("─", s.getContentWidth()-2) + "┘" + ui.Reset + "\n")
+			}
+			enhanced.WriteString("\n")
+			codeBlockLang = ""
+			continue
+		}
+
+		// Process code block lines
+		if inCodeBlock {
+			codeLineCount++
+			if strings.TrimSpace(line) != "" {
+				// Add the code line with enhanced styling
+				enhanced.WriteString(ui.BGGray + ui.Cyan + " " + line)
+				if len(line) < s.getContentWidth()-2 {
+					enhanced.WriteString(strings.Repeat(" ", s.getContentWidth()-2-len(line)))
+				}
+				enhanced.WriteString(" " + ui.Reset + "\n")
+			} else {
+				enhanced.WriteString(ui.BGGray + " " + strings.Repeat(" ", s.getContentWidth()-2) + " " + ui.Reset + "\n")
+			}
+		} else {
+			// Regular content
+			enhanced.WriteString(line + "\n")
+		}
+	}
+
+	return enhanced.String()
 }
 
 // getMarkdownRenderer returns the global markdown renderer, initializing it if needed.
@@ -42,115 +125,49 @@ func getMarkdownRenderer() (*glamour.TermRenderer, error) {
 }
 
 // CommandHandler defines the interface for command handlers.
-type CommandHandler func(ctx context.Context, parts []string) (exit bool, err error)
+// CommandHandler interface for processing chat commands
+type CommandHandler interface {
+	Process(ctx context.Context, parts []string) (exit bool, err error)
+	Name() string
+	Aliases() []string
+	HelpText() string
+	Usage() string
+	MinArgs() int
+}
 
-// CommandRegistry maps command names to their handlers and help text.
+// CommandRegistry maps command names to their handlers.
 type CommandRegistry struct {
-	aliases    []string
-	handler    CommandHandler
-	helpText   string
-	minArgs    int
-	usage      string
+	handler CommandHandler
 }
 
 // Command definitions for easy extensibility.
 var commandRegistry = map[string]CommandRegistry{
-	"exit": {
-		aliases:  []string{"/exit", "/quit"},
-		helpText: "Exit the chat",
-		minArgs:  0,
-	},
-	"reset": {
-		aliases:  []string{"/reset", "/clear"},
-		helpText: "Clear conversation history",
-		minArgs:  0,
-	},
-	"help": {
-		aliases:  []string{"/help"},
-		helpText: "Show available commands",
-		minArgs:  0,
-	},
-	"history": {
-		aliases:  []string{"/history"},
-		helpText: "Show conversation history",
-		minArgs:  0,
-	},
-	"markdown": {
-		aliases:  []string{"/markdown"},
-		helpText: "Toggle markdown rendering",
-		minArgs:  0,
-	},
-	"list": {
-		aliases:  []string{"/list", "/sessions"},
-		helpText: "Show saved conversations",
-		minArgs:  0,
-	},
-	"load": {
-		aliases:  []string{"/load"},
-		helpText: "Load a saved conversation",
-		minArgs:  1,
-		usage:    "/load <session-id>",
-	},
+	"exit":     {handler: &ExitCommandHandler{session: nil}},
+	"reset":    {handler: &ResetCommandHandler{session: nil}},
+	"help":     {handler: &HelpCommandHandler{session: nil}},
+	"history":  {handler: &HistoryCommandHandler{session: nil}},
+	"markdown": {handler: &MarkdownCommandHandler{session: nil}},
+	"list":     {handler: &ListCommandHandler{session: nil}},
+	"load":     {handler: &LoadCommandHandler{session: nil}},
 }
 
 // initializeCommandHandlers sets up the command handlers.
 func (s *Session) initializeCommandHandlers() map[string]CommandHandler {
-	return map[string]CommandHandler{
-		"exit": func(ctx context.Context, parts []string) (exit bool, err error) {
-			s.println(s.colorize(colorYellow, "Goodbye!"))
-			return true, nil
-		},
-		"reset": func(ctx context.Context, parts []string) (exit bool, err error) {
-			s.history = s.history[:0]
-			s.sessionID = 0
-			s.println(s.colorize(colorYellow, "History cleared."))
-			return false, nil
-		},
-		"help": func(ctx context.Context, parts []string) (exit bool, err error) {
-			s.printHelp()
-			return false, nil
-		},
-		"history": func(ctx context.Context, parts []string) (exit bool, err error) {
-			s.printHistory()
-			return false, nil
-		},
-		"markdown": func(ctx context.Context, parts []string) (exit bool, err error) {
-			s.renderMarkdown = !s.renderMarkdown
-			status := "enabled"
-			if !s.renderMarkdown {
-				status = "disabled"
-			}
-			s.println(s.colorize(colorYellow, fmt.Sprintf("Markdown rendering %s.", status)))
-			return false, nil
-		},
-		"list": func(ctx context.Context, parts []string) (exit bool, err error) {
-			if err := s.handleListSessions(ctx); err != nil {
-				return false, err
-			}
-			return false, nil
-		},
-		"load": func(ctx context.Context, parts []string) (exit bool, err error) {
-			if len(parts) < 2 {
-				return false, errors.New("usage: /load <session-id>")
-			}
-
-			id, convErr := strconv.ParseInt(parts[1], 10, 64)
-			if convErr != nil {
-				return false, fmt.Errorf("invalid session id %q", parts[1])
-			}
-
-			if err := s.handleLoadSession(ctx, id); err != nil {
-				return false, err
-			}
-			return false, nil
-		},
+	handlers := make(map[string]CommandHandler)
+	for cmd, reg := range commandRegistry {
+		// Set session reference for handlers that need it
+		if h, ok := reg.handler.(interface{ setSession(*Session) }); ok {
+			h.setSession(s)
+		}
+		handlers[cmd] = reg.handler
 	}
+	return handlers
 }
 
 // findCommand finds a command by its alias.
 func findCommand(alias string) (string, *CommandRegistry) {
 	for cmd, reg := range commandRegistry {
-		for _, cmdAlias := range reg.aliases {
+		for _, cmdAlias := range reg.handler.Aliases() {
 			if alias == cmdAlias {
 				return cmd, &reg
 			}
@@ -158,6 +175,207 @@ func findCommand(alias string) (string, *CommandRegistry) {
 	}
 	return "", nil
 }
+
+// Command Handler Implementations
+
+// ExitCommandHandler handles the exit command
+type ExitCommandHandler struct {
+	session *Session
+}
+
+func (h *ExitCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *ExitCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	// Create a nice goodbye header
+	goodbyeText := "👋 Goodbye! Thanks for using Chatty!"
+	width := len(goodbyeText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(h.session.output, ui.BorderBlue+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Goodbye text
+	fmt.Fprint(h.session.output, ui.BGBlue+ui.BrightWhite+" │ "+goodbyeText)
+	if len(goodbyeText) < width-3 {
+		fmt.Fprint(h.session.output, strings.Repeat(" ", width-3-len(goodbyeText)))
+	}
+	fmt.Fprint(h.session.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(h.session.output, ui.BorderBlue+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
+	return true, nil
+}
+
+func (h *ExitCommandHandler) Name() string { return "exit" }
+func (h *ExitCommandHandler) Aliases() []string { return []string{"/exit", "/quit"} }
+func (h *ExitCommandHandler) HelpText() string { return "Exit the chat" }
+func (h *ExitCommandHandler) Usage() string { return "" }
+func (h *ExitCommandHandler) MinArgs() int { return 0 }
+
+// ResetCommandHandler handles the reset command
+type ResetCommandHandler struct {
+	session *Session
+}
+
+func (h *ResetCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *ResetCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	h.session.history = h.session.history[:0]
+	h.session.sessionID = 0
+
+	// Create a nice reset header
+	resetText := "🗑️ History cleared. Starting fresh!"
+	width := len(resetText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(h.session.output, ui.BorderGray+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Reset text
+	fmt.Fprint(h.session.output, ui.BGGray+ui.BrightWhite+" │ "+resetText)
+	if len(resetText) < width-3 {
+		fmt.Fprint(h.session.output, strings.Repeat(" ", width-3-len(resetText)))
+	}
+	fmt.Fprint(h.session.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(h.session.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
+	return false, nil
+}
+
+func (h *ResetCommandHandler) Name() string { return "reset" }
+func (h *ResetCommandHandler) Aliases() []string { return []string{"/reset", "/clear"} }
+func (h *ResetCommandHandler) HelpText() string { return "Clear conversation history" }
+func (h *ResetCommandHandler) Usage() string { return "" }
+func (h *ResetCommandHandler) MinArgs() int { return 0 }
+
+// HelpCommandHandler handles the help command
+type HelpCommandHandler struct {
+	session *Session
+}
+
+func (h *HelpCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *HelpCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	h.session.printHelp()
+	return false, nil
+}
+
+func (h *HelpCommandHandler) Name() string { return "help" }
+func (h *HelpCommandHandler) Aliases() []string { return []string{"/help"} }
+func (h *HelpCommandHandler) HelpText() string { return "Show available commands" }
+func (h *HelpCommandHandler) Usage() string { return "" }
+func (h *HelpCommandHandler) MinArgs() int { return 0 }
+
+// HistoryCommandHandler handles the history command
+type HistoryCommandHandler struct {
+	session *Session
+}
+
+func (h *HistoryCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *HistoryCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	h.session.printHistory()
+	return false, nil
+}
+
+func (h *HistoryCommandHandler) Name() string { return "history" }
+func (h *HistoryCommandHandler) Aliases() []string { return []string{"/history"} }
+func (h *HistoryCommandHandler) HelpText() string { return "Show conversation history" }
+func (h *HistoryCommandHandler) Usage() string { return "" }
+func (h *HistoryCommandHandler) MinArgs() int { return 0 }
+
+// MarkdownCommandHandler handles the markdown command
+type MarkdownCommandHandler struct {
+	session *Session
+}
+
+func (h *MarkdownCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *MarkdownCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	h.session.renderMarkdown = !h.session.renderMarkdown
+	status := "enabled"
+	if !h.session.renderMarkdown {
+		status = "disabled"
+	}
+
+	// Create a nice markdown header
+	markdownText := fmt.Sprintf("✨ Markdown rendering %s!", status)
+	width := len(markdownText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(h.session.output, ui.BorderGray+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Markdown text
+	fmt.Fprint(h.session.output, ui.BGGray+ui.BrightWhite+" │ "+markdownText)
+	if len(markdownText) < width-3 {
+		fmt.Fprint(h.session.output, strings.Repeat(" ", width-3-len(markdownText)))
+	}
+	fmt.Fprint(h.session.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(h.session.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
+	return false, nil
+}
+
+func (h *MarkdownCommandHandler) Name() string { return "markdown" }
+func (h *MarkdownCommandHandler) Aliases() []string { return []string{"/markdown"} }
+func (h *MarkdownCommandHandler) HelpText() string { return "Toggle markdown rendering" }
+func (h *MarkdownCommandHandler) Usage() string { return "" }
+func (h *MarkdownCommandHandler) MinArgs() int { return 0 }
+
+// ListCommandHandler handles the list command
+type ListCommandHandler struct {
+	session *Session
+}
+
+func (h *ListCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *ListCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	return false, h.session.handleListSessions(ctx)
+}
+
+func (h *ListCommandHandler) Name() string { return "list" }
+func (h *ListCommandHandler) Aliases() []string { return []string{"/list", "/sessions"} }
+func (h *ListCommandHandler) HelpText() string { return "Show saved conversations" }
+func (h *ListCommandHandler) Usage() string { return "" }
+func (h *ListCommandHandler) MinArgs() int { return 0 }
+
+// LoadCommandHandler handles the load command
+type LoadCommandHandler struct {
+	session *Session
+}
+
+func (h *LoadCommandHandler) setSession(s *Session) { h.session = s }
+
+func (h *LoadCommandHandler) Process(ctx context.Context, parts []string) (exit bool, err error) {
+	if len(parts) < 2 {
+		return false, errors.New("usage: /load <session-id>")
+	}
+
+	id, convErr := strconv.ParseInt(parts[1], 10, 64)
+	if convErr != nil {
+		return false, fmt.Errorf("invalid session id %q", parts[1])
+	}
+
+	if err := h.session.handleLoadSession(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (h *LoadCommandHandler) Name() string { return "load" }
+func (h *LoadCommandHandler) Aliases() []string { return []string{"/load"} }
+func (h *LoadCommandHandler) HelpText() string { return "Load a saved conversation" }
+func (h *LoadCommandHandler) Usage() string { return "/load <session-id>" }
+func (h *LoadCommandHandler) MinArgs() int { return 1 }
 
 // ANSI color codes and styles for terminal output
 const (
@@ -167,8 +385,29 @@ const (
 	colorRed     = "\033[31m"
 	colorYellow  = "\033[33m"
 	colorMagenta = "\033[35m"
+	colorBlue    = "\033[34m"
+	colorWhite   = "\033[37m"
+	colorGray    = "\033[90m"
 	styleDim     = "\033[2m"
 	styleItalic  = "\033[3m"
+	styleBold    = "\033[1m"
+)
+
+// Unicode box drawing characters for visual separators
+const (
+	boxHorizontal   = "─"
+	boxVertical     = "│"
+	boxTopLeft      = "┌"
+	boxTopRight     = "┐"
+	boxBottomLeft   = "└"
+	boxBottomRight  = "┘"
+	boxCross        = "┼"
+	boxTeeDown      = "┬"
+	boxTeeUp        = "┴"
+	boxTeeRight     = "├"
+	boxTeeLeft      = "┤"
+	separatorThin   = "────────────────────────────────────────"
+	separatorThick   = "════════════════════════════════════════"
 )
 
 // Session manages a chat conversation with history.
@@ -184,6 +423,7 @@ type Session struct {
 	version        string
 	renderMarkdown bool
 	lineReader     *liner.State
+	terminalWidth  int
 }
 
 // NewSession creates a new chat session.
@@ -195,7 +435,7 @@ func NewSession(client *Client, cfg *config.Config, store *storage.Store, versio
 		return nil, errors.New("config cannot be nil")
 	}
 
-	return &Session{
+	s := &Session{
 		client:         client,
 		config:         cfg,
 		store:          store,
@@ -205,7 +445,41 @@ func NewSession(client *Client, cfg *config.Config, store *storage.Store, versio
 		useColors:      true,
 		version:        version,
 		renderMarkdown: true,
-	}, nil
+	}
+
+	// Detect terminal width for responsive design
+	s.detectTerminalWidth()
+
+	return s, nil
+}
+
+// detectTerminalWidth determines the actual terminal width for responsive UI
+func (s *Session) detectTerminalWidth() {
+	width := 80 // Default fallback width
+
+	// Try to get terminal size from the system
+	if fd := s.input.(*os.File); fd != nil && fd.Name() == "/dev/stdin" {
+		if w, _, err := term.GetSize(int(fd.Fd())); err == nil && w > 0 {
+			width = w
+		}
+	}
+
+	// Apply reasonable limits for terminal UI
+	if width > 120 {
+		width = 120 // Cap maximum width for better readability
+	} else if width < 40 {
+		width = 40 // Minimum width for UI elements
+	}
+
+	s.terminalWidth = width
+}
+
+// getContentWidth returns the usable width for content (excluding margins/padding)
+func (s *Session) getContentWidth() int {
+	// Reserve space for borders, avatar, and padding
+	// Format: [avatar] content (with borders)
+	// Roughly 8 chars for borders/avatars, rest for content
+	return s.terminalWidth - 8
 }
 
 // Run starts the interactive chat loop.
@@ -313,12 +587,14 @@ func (s *Session) persistExchange(ctx context.Context, userMsg, assistantMsg Mes
 		return
 	}
 
-	if err := s.store.AppendMessage(ctx, s.sessionID, storage.Message{Role: userMsg.Role, Content: userMsg.Content}); err != nil {
-		s.printError(fmt.Sprintf("Failed to save user message: %v", err))
-		return
+	// Use batch operations for better performance
+	messages := []storage.Message{
+		{Role: userMsg.Role, Content: userMsg.Content},
+		{Role: assistantMsg.Role, Content: assistantMsg.Content},
 	}
-	if err := s.store.AppendMessage(ctx, s.sessionID, storage.Message{Role: assistantMsg.Role, Content: assistantMsg.Content}); err != nil {
-		s.printError(fmt.Sprintf("Failed to save assistant message: %v", err))
+
+	if err := s.store.AppendMessagesBatch(ctx, s.sessionID, messages); err != nil {
+		s.printError(fmt.Sprintf("Failed to save messages batch: %v", err))
 	}
 }
 
@@ -332,23 +608,69 @@ func (s *Session) handleListSessions(ctx context.Context) error {
 		return fmt.Errorf("list sessions: %w", err)
 	}
 
-	s.println(s.colorize(colorYellow, "=== Saved Sessions ==="))
+	// Create a nice sessions header
+	sessionsText := "📁 Saved Sessions"
+	width := 50
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderGray+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Sessions text
+	fmt.Fprint(s.output, ui.BGGray+ui.BrightWhite+" │ "+sessionsText)
+	if len(sessionsText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(sessionsText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Bottom border
+	fmt.Fprint(s.output, ui.BorderGray+"├"+strings.Repeat("─", width-2)+"┤"+ui.Reset+"\n")
+
 	if len(sessions) == 0 {
-		s.println(s.colorize(colorYellow, "No saved sessions yet."))
+		// No sessions message
+		noSessionsText := "No saved sessions yet."
+		fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+noSessionsText)
+		if len(noSessionsText) < width-3 {
+			fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(noSessionsText)))
+		}
+		fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+		// Final border
+		fmt.Fprint(s.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 		return nil
 	}
 
 	for _, summary := range sessions {
 		updated := formatRelative(summary.UpdatedAt)
-		created := formatRelative(summary.CreatedAt)
 		title := summary.Name
 		if strings.TrimSpace(title) == "" {
 			title = "Untitled session"
 		}
 
-		s.println(fmt.Sprintf("%s %s", s.colorize(colorCyan, fmt.Sprintf("#%d", summary.ID)), s.colorize(colorYellow, title)))
-		s.println(s.colorize(styleDim+colorYellow, fmt.Sprintf("   %d messages · created %s · updated %s", summary.MessageCount, created, updated)))
+		// Session header
+		sessionHeader := fmt.Sprintf("#%d %s", summary.ID, title)
+		fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+sessionHeader)
+		if len(sessionHeader) < width-3 {
+			fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(sessionHeader)))
+		}
+		fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+		// Session details
+		details := fmt.Sprintf("  📝 %d messages │ 🕐 %s", summary.MessageCount, updated)
+		fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+details)
+		if len(details) < width-3 {
+			fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(details)))
+		}
+		fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+		// Empty line between sessions
+		fmt.Fprint(s.output, ui.BGSystem+" │"+strings.Repeat(" ", width-2)+"│"+ui.Reset+"\n")
 	}
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 
 	return nil
 }
@@ -375,8 +697,33 @@ func (s *Session) handleLoadSession(ctx context.Context, id int64) error {
 		title = "Untitled session"
 	}
 
-	s.println(s.colorize(colorYellow, fmt.Sprintf("Loaded session #%d: %s (%d messages)", transcript.Summary.ID, title, len(transcript.Messages))))
-	s.println(s.colorize(colorYellow, "Use /history to view the conversation."))
+	// Create a nice success header
+	successText := fmt.Sprintf("✅ Loaded session #%d: %s", transcript.Summary.ID, title)
+	width := len(successText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderGreen+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Success text
+	fmt.Fprint(s.output, ui.BGGreen+ui.BrightWhite+" │ "+successText)
+	if len(successText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(successText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Session details
+	details := fmt.Sprintf("📋 %d messages loaded", len(transcript.Messages))
+	fmt.Fprint(s.output, ui.BGGreen+ui.BrightWhite+" │ "+details)
+	if len(details) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(details)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderGreen+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 
 	return nil
 }
@@ -403,26 +750,52 @@ func formatRelative(t time.Time) string {
 }
 
 func (s *Session) sendMessage(ctx context.Context, input string) error {
+	// Validate and sanitize input first
+	if err := validation.ValidateMessage(input); err != nil {
+		return fmt.Errorf("invalid input: %w", err)
+	}
+
+	// Sanitize the input
+	sanitizedInput := validation.SanitizeInput(input, validation.MaxUserMessageLength)
+
+	// Create a child context with timeout for the entire operation
+	// Create a child context with timeout for the entire operation
+	messageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer func() { cancel() }()
+
 	if s.store != nil && s.sessionID == 0 {
-		if err := s.ensureSession(ctx, input); err != nil {
+		if err := s.ensureSession(messageCtx, sanitizedInput); err != nil {
 			s.printError(fmt.Sprintf("Failed to initialise persistence: %v", err))
 			s.store = nil
 		}
 	}
 
 	// Add user message to history
-	userMsg := Message{Role: "user", Content: input}
+	userMsg := Message{Role: "user", Content: sanitizedInput}
 	s.history = append(s.history, userMsg)
+
+	// Display user message with enhanced formatting
+	s.printUserMessage(sanitizedInput)
 
 	var reply string
 	var err error
 
+	// Check if context is still valid before proceeding
+	select {
+	case <-messageCtx.Done():
+		// Context cancelled or timed out
+		s.history = s.history[:len(s.history)-1] // Remove user message
+		return messageCtx.Err()
+	default:
+		// Continue with message processing
+	}
+
 	if s.config.Model.Stream {
 		// Streaming mode
-		reply, err = s.streamResponse(ctx)
+		reply, err = s.streamResponse(messageCtx)
 	} else {
 		// Non-streaming mode
-		reply, err = s.client.Chat(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature)
+		reply, err = s.client.Chat(messageCtx, s.history, s.config.Model.Name, s.config.Model.Temperature)
 		if err == nil {
 			s.printAssistant(reply)
 		}
@@ -431,6 +804,11 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	if err != nil {
 		// Remove the user message if the request failed
 		s.history = s.history[:len(s.history)-1]
+
+		// Handle context cancellation specially
+		if messageCtx.Err() != nil {
+			return fmt.Errorf("chat request cancelled or timed out: %w", messageCtx.Err())
+		}
 		return fmt.Errorf("chat request failed: %w", err)
 	}
 
@@ -438,7 +816,10 @@ func (s *Session) sendMessage(ctx context.Context, input string) error {
 	assistantMsg := Message{Role: "assistant", Content: reply}
 	s.history = append(s.history, assistantMsg)
 
-	s.persistExchange(ctx, userMsg, assistantMsg)
+	// Persist with a separate timeout for storage operations
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer persistCancel()
+	s.persistExchange(persistCtx, userMsg, assistantMsg)
 
 	return nil
 }
@@ -450,13 +831,52 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 	inThinking := false
 	thinkingStarted := false
 	thinkingClosed := false
+	frameCount := 0
 
-	// Regex patterns for thinking tags
-	thinkTagPattern := regexp.MustCompile(`<think>|<thinking>`)
-	thinkClosePattern := regexp.MustCompile(`</think>|</thinking>`)
+	// Print message header at start
+	if !thinkingStarted {
+		s.printMessageHeader("Assistant", colorGreen)
+		// Show initial loading indicator with background
+		loadingMsg := ui.CreateLoadingMessage("🤖", "Thinking...", frameCount)
+		if s.useColors {
+			fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+			fmt.Fprint(s.output, loadingMsg)
+			if len(loadingMsg) < s.getContentWidth()-2 {
+				fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(loadingMsg)))
+			}
+			fmt.Fprint(s.output, " "+ui.Reset+"\n")
+		} else {
+			s.println(loadingMsg)
+		}
+		fmt.Fprint(s.output, "\r\x1b[K") // Clear the line for streaming
+		frameCount++
+	}
+
+	// Regex patterns for thinking tags - handle both formats
+	thinkTagPattern := regexp.MustCompile(`(<thinking>)|(<think>)`)
+	thinkClosePattern := regexp.MustCompile(`(</thinking>)|(</think>)`)
 
 	err := s.client.ChatStream(ctx, s.history, s.config.Model.Name, s.config.Model.Temperature, func(chunk string) error {
 		fullResponse.WriteString(chunk)
+
+		// Update loading animation frame periodically
+		if !thinkingStarted && !inThinking {
+			frameCount = (frameCount + 1) % 10
+			if frameCount % 3 == 0 { // Update every 3rd frame to avoid too fast updates
+				fmt.Fprint(s.output, "\r\x1b[K") // Clear line
+				loadingMsg := ui.CreateLoadingMessage("🤖", "Generating response...", frameCount)
+				if s.useColors {
+					fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+					fmt.Fprint(s.output, loadingMsg)
+					if len(loadingMsg) < s.getContentWidth()-2 {
+						fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(loadingMsg)))
+					}
+					fmt.Fprint(s.output, " "+ui.Reset+"\n")
+				} else {
+					fmt.Fprint(s.output, loadingMsg)
+				}
+			}
+		}
 
 		// If we're past thinking tags, stream AND collect for markdown rendering
 		if thinkingClosed {
@@ -464,9 +884,13 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 			// Stream the chunk in real-time
 			if s.useColors && afterThinkingContent.Len() == len(chunk) {
 				// First chunk after thinking - set color
-				fmt.Fprint(s.output, colorGreen)
+				fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+				fmt.Fprint(s.output, chunk)
+			} else if s.useColors {
+				fmt.Fprint(s.output, chunk)
+			} else {
+				fmt.Fprint(s.output, chunk)
 			}
-			fmt.Fprint(s.output, chunk)
 			return nil
 		}
 
@@ -481,9 +905,15 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 				beforeTag := bufferStr[:loc[0]]
 				if beforeTag != "" && !thinkingStarted {
 					if s.useColors {
-						fmt.Fprint(s.output, colorGreen)
+						fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+						fmt.Fprint(s.output, beforeTag)
+						if len(beforeTag) < s.getContentWidth()-2 {
+							fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(beforeTag)))
+						}
+						fmt.Fprint(s.output, " "+ui.Reset+"\n")
+					} else {
+						fmt.Fprint(s.output, beforeTag)
 					}
-					fmt.Fprint(s.output, beforeTag)
 				}
 
 				// Switch to thinking mode
@@ -491,15 +921,24 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 				thinkingStarted = true
 				if s.useColors {
 					var buf strings.Builder
-					buf.WriteString(colorReset)
-					buf.WriteString(styleDim)
-					buf.WriteString(colorMagenta)
+					buf.WriteString(ui.Reset)
+					buf.WriteString(ui.Faint)
+					buf.WriteString(ui.Magenta)
 					fmt.Fprint(s.output, buf.String())
 				}
 
 				// Print opening tag and content after it
 				afterTag := bufferStr[loc[0]:]
-				fmt.Fprint(s.output, afterTag)
+				if s.useColors {
+					fmt.Fprint(s.output, ui.BGAssistant+ui.Magenta+" ")
+					fmt.Fprint(s.output, afterTag)
+					if len(afterTag) < s.getContentWidth()-2 {
+						fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(afterTag)))
+					}
+					fmt.Fprint(s.output, " "+ui.Reset+"\n")
+				} else {
+					fmt.Fprint(s.output, afterTag)
+				}
 				buffer.Reset()
 			}
 		} else if inThinking && thinkClosePattern.MatchString(bufferStr) {
@@ -508,13 +947,22 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 			if loc != nil {
 				// Print content including closing tag
 				upToAndIncludingTag := bufferStr[:loc[1]]
-				fmt.Fprint(s.output, upToAndIncludingTag)
+				if s.useColors {
+					fmt.Fprint(s.output, ui.BGAssistant+ui.Magenta+" ")
+					fmt.Fprint(s.output, upToAndIncludingTag)
+					if len(upToAndIncludingTag) < s.getContentWidth()-2 {
+						fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(upToAndIncludingTag)))
+					}
+					fmt.Fprint(s.output, " "+ui.Reset+"\n")
+				} else {
+					fmt.Fprint(s.output, upToAndIncludingTag)
+				}
 
 				// Switch back to normal mode
 				inThinking = false
 				thinkingClosed = true
 				if s.useColors {
-					fmt.Fprint(s.output, colorReset)
+					fmt.Fprint(s.output, ui.Reset)
 				}
 
 				// Start streaming and collecting content after closing tag
@@ -522,9 +970,15 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 				if afterTag != "" {
 					afterThinkingContent.WriteString(afterTag)
 					if s.useColors {
-						fmt.Fprint(s.output, colorGreen)
+						fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+						fmt.Fprint(s.output, afterTag)
+						if len(afterTag) < s.getContentWidth()-2 {
+							fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(afterTag)))
+						}
+						fmt.Fprint(s.output, " "+ui.Reset+"\n")
+					} else {
+						fmt.Fprint(s.output, afterTag)
 					}
-					fmt.Fprint(s.output, afterTag)
 				}
 				buffer.Reset()
 			}
@@ -532,11 +986,20 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 			// Normal streaming - print as we go
 			if !thinkingStarted && !inThinking {
 				if s.useColors {
-					fmt.Fprint(s.output, colorGreen)
+					if fullResponse.Len() == len(chunk) {
+						// First chunk - add background
+						fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+						fmt.Fprint(s.output, chunk)
+					} else {
+						fmt.Fprint(s.output, chunk)
+					}
 					thinkingStarted = true
+				} else {
+					fmt.Fprint(s.output, chunk)
 				}
+			} else {
+				fmt.Fprint(s.output, chunk)
 			}
-			fmt.Fprint(s.output, chunk)
 			buffer.Reset()
 			buffer.WriteString(chunk)
 		}
@@ -550,9 +1013,12 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 
 	// Reset colors and add newline after streaming
 	if s.useColors {
-		fmt.Fprint(s.output, colorReset)
+		fmt.Fprint(s.output, ui.Reset)
 	}
 	fmt.Fprintln(s.output)
+
+	// Print message footer
+	s.printMessageFooter()
 
 	// If we collected content after thinking tags AND markdown is enabled, re-render with markdown
 	if thinkingClosed && afterThinkingContent.Len() > 0 && s.renderMarkdown {
@@ -565,8 +1031,10 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 				rendered, err := renderer.Render(finalContent)
 				if err == nil {
 					// Print a separator and the markdown-rendered version
-					fmt.Fprintln(s.output, s.colorize(styleDim+colorYellow, "─── Formatted Response ───"))
+					fmt.Fprintln(s.output, s.colorize(ui.Faint+ui.Yellow, ui.CreateSeparatorWithWidth(s.getContentWidth(), "thin")))
+					s.printMessageHeader("Formatted Response", colorBlue)
 					fmt.Fprint(s.output, rendered)
+					s.printMessageFooter()
 				}
 			}
 		}
@@ -580,7 +1048,15 @@ func (s *Session) streamResponse(ctx context.Context) (string, error) {
 }
 
 func (s *Session) handleCommand(ctx context.Context, cmd string) (exit bool, err error) {
-	parts := strings.Fields(cmd)
+	// Validate command input
+	if err := validation.ValidateCommand(cmd); err != nil {
+		return false, fmt.Errorf("invalid command: %w", err)
+	}
+
+	// Sanitize command
+	sanitizedCmd := validation.SanitizeInput(cmd, validation.MaxCommandLength)
+
+	parts := strings.Fields(sanitizedCmd)
 	if len(parts) == 0 {
 		return false, nil
 	}
@@ -589,16 +1065,19 @@ func (s *Session) handleCommand(ctx context.Context, cmd string) (exit bool, err
 	commandName, reg := findCommand(parts[0])
 
 	if commandName == "" {
+		// Simple error message
+		s.println(fmt.Sprintf("❓ Unknown command: %q. Use /help to see available commands.", parts[0]))
 		return false, fmt.Errorf("unknown command %q. Try /help", parts[0])
 	}
 
 	// Validate minimum arguments
-	if len(parts) < reg.minArgs+1 { // +1 because parts[0] is the command itself
+	if len(parts) < reg.handler.MinArgs()+1 { // +1 because parts[0] is the command itself
 		usageText := ""
-		if reg.usage != "" {
-			usageText = fmt.Sprintf(" (usage: %s)", reg.usage)
+		if reg.handler.Usage() != "" {
+			usageText = fmt.Sprintf(" (usage: %s)", reg.handler.Usage())
 		}
-		return false, fmt.Errorf("command %q requires at least %d arguments%s", parts[0], reg.minArgs, usageText)
+		s.println(fmt.Sprintf("⚠️ Command %q requires at least %d arguments%s", parts[0], reg.handler.MinArgs(), usageText))
+		return false, fmt.Errorf("command %q requires at least %d arguments%s", parts[0], reg.handler.MinArgs(), usageText)
 	}
 
 	// Execute command handler
@@ -607,20 +1086,71 @@ func (s *Session) handleCommand(ctx context.Context, cmd string) (exit bool, err
 		return false, fmt.Errorf("handler not found for command %q", commandName)
 	}
 
-	return handler(ctx, parts)
+	return handler.Process(ctx, parts)
 }
 
 func (s *Session) printWelcome() {
-	s.println(s.colorize(colorCyan, fmt.Sprintf("=== Chatty v%s ===", s.version)))
-	s.println(fmt.Sprintf("Model: %s | Temperature: %.1f", s.config.Model.Name, s.config.Model.Temperature))
-	s.println(s.colorize(colorYellow, "Type /help for commands, /exit to quit"))
-	s.println("")
+	// Create a nice welcome header
+	welcomeText := fmt.Sprintf("🤖 Chatty v%s - Ready to chat!", s.version)
+	width := len(welcomeText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderBlue+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Welcome text
+	fmt.Fprint(s.output, ui.BGBlue+ui.BrightWhite+" │ "+welcomeText)
+	if len(welcomeText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(welcomeText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Model info
+	modelText := fmt.Sprintf("Model: %s | Temperature: %.1f", s.config.Model.Name, s.config.Model.Temperature)
+	fmt.Fprint(s.output, ui.BGBlue+ui.BrightWhite+" │ "+modelText)
+	if len(modelText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(modelText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Bottom border
+	fmt.Fprint(s.output, ui.BorderBlue+"├"+strings.Repeat("─", width-2)+"┤"+ui.Reset+"\n")
+
+	// Instructions
+	fmt.Fprint(s.output, ui.BGBlue+ui.BrightWhite+" │ "+"Type /help for commands, /exit to quit")
+	if len("Type /help for commands, /exit to quit") < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len("Type /help for commands, /exit to quit")))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderBlue+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 }
 
 func (s *Session) printHelp() {
+	// Create a nice help header
+	helpText := "📚 Available Commands"
+	width := len(helpText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderGreen+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Help text
+	fmt.Fprint(s.output, ui.BGGreen+ui.BrightWhite+" │ "+helpText)
+	if len(helpText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(helpText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Bottom border
+	fmt.Fprint(s.output, ui.BorderGreen+"├"+strings.Repeat("─", width-2)+"┤"+ui.Reset+"\n")
+
 	var buf strings.Builder
-	buf.WriteString(s.colorize(colorYellow, "Available commands:"))
-	buf.WriteString("\n")
 
 	// Group commands by category for better organization
 	type HelpEntry struct {
@@ -634,21 +1164,21 @@ func (s *Session) printHelp() {
 	for _, reg := range commandRegistry {
 		// Get primary command name (first alias without slash)
 		var primaryCmd string
-		for _, alias := range reg.aliases {
+		for _, alias := range reg.handler.Aliases() {
 			if !strings.HasPrefix(alias, "/") {
 				primaryCmd = alias
 				break
 			}
 		}
-		if primaryCmd == "" && len(reg.aliases) > 0 {
-			primaryCmd = reg.aliases[0]
+		if primaryCmd == "" && len(reg.handler.Aliases()) > 0 {
+			primaryCmd = reg.handler.Aliases()[0]
 		}
 
 		helpEntries = append(helpEntries, HelpEntry{
 			command:  primaryCmd,
-			aliases:  reg.aliases,
-			helpText: reg.helpText,
-			usage:    reg.usage,
+			aliases:  reg.handler.Aliases(),
+			helpText: reg.handler.HelpText(),
+			usage:    reg.handler.Usage(),
 		})
 	}
 
@@ -664,50 +1194,102 @@ func (s *Session) printHelp() {
 	for _, entry := range helpEntries {
 		var cmdBuf strings.Builder
 		cmdBuf.WriteString("  ")
-		cmdBuf.WriteString(s.colorize(colorCyan, entry.aliases[0]))
+		cmdBuf.WriteString(s.colorize(styleBold+colorCyan, entry.aliases[0]))
 		if len(entry.aliases) > 1 {
 			for i := 1; i < len(entry.aliases); i++ {
 				cmdBuf.WriteString(", ")
-				cmdBuf.WriteString(entry.aliases[i])
+				cmdBuf.WriteString(s.colorize(styleDim+colorGray, entry.aliases[i]))
 			}
 		}
-		cmdBuf.WriteString(" - ")
-		cmdBuf.WriteString(entry.helpText)
+		cmdBuf.WriteString(" ")
+		cmdBuf.WriteString(s.colorize(styleDim+colorGray, "─"))
+		cmdBuf.WriteString(" ")
+		cmdBuf.WriteString(s.colorize(colorWhite, entry.helpText))
 		if entry.usage != "" {
 			cmdBuf.WriteString("\n    ")
-			cmdBuf.WriteString(s.colorize(styleDim, fmt.Sprintf("Usage: %s", entry.usage)))
+			cmdBuf.WriteString(s.colorize(styleDim+colorYellow, fmt.Sprintf("Usage: %s", entry.usage)))
 		}
 		buf.WriteString(cmdBuf.String())
 		buf.WriteString("\n")
 	}
 
-	s.println(buf.String())
+	// Print command list with background
+	lines := strings.Split(buf.String(), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+line)
+			if len(line) < width-3 {
+				fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(line)))
+			}
+			fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+		} else {
+			fmt.Fprint(s.output, ui.BGSystem+" │"+strings.Repeat(" ", width-2)+"│"+ui.Reset+"\n")
+		}
+	}
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderGreen+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 }
 
 func (s *Session) printHistory() {
 	if len(s.history) == 0 {
-		s.println(s.colorize(colorYellow, "No history yet."))
+		s.println("No conversation history yet.")
 		return
 	}
 
-	s.println(s.colorize(colorYellow, "=== History ==="))
+	// Create a nice history header
+	historyText := "📜 Conversation History"
+	width := len(historyText) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderGray+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// History text
+	fmt.Fprint(s.output, ui.BGGray+ui.BrightWhite+" │ "+historyText)
+	if len(historyText) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(historyText)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Bottom border
+	fmt.Fprint(s.output, ui.BorderGray+"├"+strings.Repeat("─", width-2)+"┤"+ui.Reset+"\n")
+
 	for i, msg := range s.history {
 		prefix := "User"
-		color := colorCyan
 		if msg.Role == "assistant" {
 			prefix = "AI"
-			color = colorGreen
 		}
 
-		var buf strings.Builder
-		buf.WriteString(s.colorize(colorYellow, ""))
-		buf.WriteString(fmt.Sprintf("[%d] %s:", i+1, prefix))
-		buf.WriteString(colorReset)
-		buf.WriteString(" ")
-		buf.WriteString(s.colorize(color, msg.Content))
+		// Message header
+		msgHeader := fmt.Sprintf("[%d] %s:", i+1, prefix)
+		fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+msgHeader)
+		if len(msgHeader) < width-3 {
+			fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(msgHeader)))
+		}
+		fmt.Fprint(s.output, " │"+ui.Reset+"\n")
 
-		s.println(buf.String())
+		// Truncate long messages for history view
+		content := msg.Content
+		if len(content) > 100 {
+			content = content[:97] + "..."
+		}
+
+		// Message content
+		fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+"    "+content)
+		if len("    "+content) < width-3 {
+			fmt.Fprint(s.output, strings.Repeat(" ", width-3-len("    "+content)))
+		}
+		fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+		// Empty line between messages
+		fmt.Fprint(s.output, ui.BGSystem+" │"+strings.Repeat(" ", width-2)+"│"+ui.Reset+"\n")
 	}
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 }
 
 func (s *Session) printPrompt() {
@@ -719,20 +1301,70 @@ func (s *Session) printAssistant(text string) {
 		renderer, err := getMarkdownRenderer()
 		if err != nil {
 			// Failed to get renderer, fallback to plain text
-			s.println(s.colorize(colorGreen, text))
+			s.printMessageHeader("Assistant", colorGreen)
+			if s.useColors {
+				// Print with background color
+				lines := strings.Split(text, "\n")
+				for _, line := range lines {
+					fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+					fmt.Fprint(s.output, line)
+					if len(line) < s.getContentWidth()-2 {
+						fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(line)))
+					}
+					fmt.Fprint(s.output, " "+ui.Reset+"\n")
+				}
+			} else {
+				s.println(text)
+			}
+			s.printMessageFooter()
 			return
 		}
-		// Render markdown
+		// Render markdown with enhanced styling
 		rendered, err := renderer.Render(text)
 		if err != nil {
 			// Fallback to plain text if rendering fails
-			s.println(s.colorize(colorGreen, text))
+			s.printMessageHeader("Assistant", colorGreen)
+			if s.useColors {
+				// Print with background color
+				lines := strings.Split(text, "\n")
+				for _, line := range lines {
+					fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+					fmt.Fprint(s.output, line)
+					if len(line) < s.getContentWidth()-2 {
+						fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(line)))
+					}
+					fmt.Fprint(s.output, " "+ui.Reset+"\n")
+				}
+			} else {
+				s.println(text)
+			}
+			s.printMessageFooter()
 			return
 		}
-		fmt.Fprint(s.output, rendered)
+		s.printMessageHeader("Assistant", colorGreen)
+
+		// Enhance the rendered markdown with better code block styling
+		enhanced := s.enhanceCodeBlocks(rendered)
+		fmt.Fprint(s.output, enhanced)
+		s.printMessageFooter()
 	} else {
-		// Plain text mode
-		s.println(s.colorize(colorGreen, text))
+		// Plain text mode with enhanced styling
+		s.printMessageHeader("Assistant", colorGreen)
+		if s.useColors {
+			// Print with background color
+			lines := strings.Split(text, "\n")
+			for _, line := range lines {
+				fmt.Fprint(s.output, ui.BGAssistant+ui.BrightWhite+" ")
+				fmt.Fprint(s.output, line)
+				if len(line) < s.getContentWidth()-2 {
+					fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(line)))
+				}
+				fmt.Fprint(s.output, " "+ui.Reset+"\n")
+			}
+		} else {
+			s.println(text)
+		}
+		s.printMessageFooter()
 	}
 }
 
@@ -824,8 +1456,73 @@ func (s *Session) printWithThinkingTags(text string) {
 	}
 }
 
+func (s *Session) printMessageFooter() {
+	// Add proper message container footer with bottom border
+	fmt.Fprint(s.output, "\n")
+	fmt.Fprint(s.output, ui.CreateMessageFooter("message", s.getContentWidth()))
+	fmt.Fprint(s.output, "\n\n") // Extra spacing between messages
+}
+
+func (s *Session) printMessageHeader(role string, roleColor string) {
+	now := time.Now()
+
+	var headerText string
+	switch role {
+	case "User":
+		headerText = ui.CreateMessageHeader("user", now)
+	case "Assistant":
+		headerText = ui.CreateMessageHeader("assistant", now)
+	default:
+		headerText = ui.CreateMessageHeader("message", now)
+	}
+
+	fmt.Fprint(s.output, headerText)
+	fmt.Fprint(s.output, "\n") // Single newline after header
+}
+
+func (s *Session) printUserMessage(content string) {
+	s.printMessageHeader("User", colorCyan)
+
+	// Print content with user background color
+	if s.useColors {
+		// Wrap content for proper background coloring
+		lines := strings.Split(content, "\n")
+		for _, line := range lines {
+			fmt.Fprint(s.output, ui.BGUser+ui.BrightWhite+" ")
+			fmt.Fprint(s.output, line)
+			if len(line) < s.getContentWidth()-2 {
+				fmt.Fprint(s.output, strings.Repeat(" ", s.getContentWidth()-2-len(line)))
+			}
+			fmt.Fprint(s.output, " "+ui.Reset+"\n")
+		}
+	} else {
+		s.println(content)
+	}
+	s.printMessageFooter()
+}
+
 func (s *Session) printError(text string) {
-	s.println(s.colorize(colorRed, "Error: "+text))
+	// Enhanced error message with better styling
+	errorMsg := ui.CreateStatusMessage("❌", "Error: "+text, "error")
+
+	// Create a nice error header
+	width := len(errorMsg) + 4
+	if width < 40 {
+		width = 40
+	}
+
+	// Top border
+	fmt.Fprint(s.output, ui.BorderGray+"┌"+strings.Repeat("─", width-2)+"┐"+ui.Reset+"\n")
+
+	// Error text
+	fmt.Fprint(s.output, ui.BGSystem+ui.BrightWhite+" │ "+errorMsg)
+	if len(errorMsg) < width-3 {
+		fmt.Fprint(s.output, strings.Repeat(" ", width-3-len(errorMsg)))
+	}
+	fmt.Fprint(s.output, " │"+ui.Reset+"\n")
+
+	// Final border
+	fmt.Fprint(s.output, ui.BorderGray+"└"+strings.Repeat("─", width-2)+"┘"+ui.Reset+"\n\n")
 }
 
 func (s *Session) println(text string) {
@@ -860,11 +1557,43 @@ func (s *Session) DisableColors() {
 }
 
 func (s *Session) promptString() string {
-	return s.colorize(colorCyan, "> ")
+	var prompt strings.Builder
+
+	// Add session context if available
+	if s.sessionID > 0 {
+		prompt.WriteString(s.colorize(styleDim+colorBlue, fmt.Sprintf("[%d] ", s.sessionID)))
+	}
+
+	// Add timestamp if enabled
+	if s.config.UI.ShowTimestamps {
+		timestamp := time.Now().Format("15:04")
+		prompt.WriteString(s.colorize(styleDim+colorGray, fmt.Sprintf("%s ", timestamp)))
+	}
+
+	// Main prompt
+	prompt.WriteString(s.colorize(styleBold+colorCyan, "└─► "))
+
+	return prompt.String()
 }
 
 func (s *Session) plainPromptString() string {
-	return "> "
+	var prompt strings.Builder
+
+	// Add session context if available
+	if s.sessionID > 0 {
+		prompt.WriteString(fmt.Sprintf("[%d] ", s.sessionID))
+	}
+
+	// Add timestamp if enabled
+	if s.config.UI.ShowTimestamps {
+		timestamp := time.Now().Format("15:04")
+		prompt.WriteString(fmt.Sprintf("%s ", timestamp))
+	}
+
+	// Main prompt
+	prompt.WriteString("> ")
+
+	return prompt.String()
 }
 
 func (s *Session) shouldUseLineEditor() bool {

@@ -141,7 +141,11 @@ make run
 
 ### Available Commands
 
-Once running, you can use these commands:
+Chatty supports both interactive TUI mode and direct CLI mode:
+
+#### Interactive Mode Commands
+
+Once running in interactive mode, you can use these commands:
 - `/help` - Show available commands
 - `/exit` or `/quit` - Exit the chat
 - `/reset` or `/clear` - Clear conversation history
@@ -149,6 +153,16 @@ Once running, you can use these commands:
 - `/markdown` - Toggle markdown rendering on/off
 - `/list` or `/sessions` - List saved conversations
 - `/load <id>` - Load a saved conversation by its numeric id
+
+#### CLI Mode Commands
+
+You can also use commands directly from the command line:
+- `./chatty /help` - Show CLI help
+- `./chatty /list` - List saved conversations
+- `./chatty /load <id>` - Load and display a saved conversation
+- `./chatty "Your question here"` - Ask a question directly and get the response
+
+CLI mode is useful for scripting or when you need a quick answer without entering the interactive session.
 
 ## Architecture
 

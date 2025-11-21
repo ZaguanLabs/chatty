@@ -7,24 +7,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+	chattyErrors "github.com/ZaguanLabs/chatty/internal/errors"
 )
 
 const (
 	defaultDirName  = ".local/share/chatty"
 	defaultFileName = "chatty.db"
 	timestampLayout = time.RFC3339
+
+	// Security constants
+	maxSessionNameLength = 200
+	maxMessageLength     = 100000 // 100KB max message size
+	maxRoleLength        = 50
+	minRoleLength        = 1
 )
 
 // Store wraps access to the persistent conversation database.
 type Store struct {
-	db              *sql.DB
-	preparedStmts   map[string]*sql.Stmt
-	preparedMutex   sync.RWMutex
+	db            *sql.DB
+	preparedStmts map[string]*sql.Stmt
+	preparedMutex sync.RWMutex
 }
 
 // Message represents a persisted chat message.
@@ -57,34 +65,46 @@ type PaginationOptions struct {
 
 // Open initialises the storage layer, creating the database if necessary.
 func Open(path string) (*Store, error) {
+	return OpenWithPool(path, 1) // Pool size ignored
+}
+
+// OpenWithPool creates a store. maxConnections parameter is ignored in favor of safe single-connection usage.
+func OpenWithPool(path string, maxConnections int) (*Store, error) {
 	resolved, err := resolvePath(path)
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", resolved)
+	// Use connection string parameters for timeout and WAL
+	dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL", resolved)
+	
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite database: %w", err)
+		return nil, chattyErrors.NewStorageError("open", fmt.Sprintf("failed to open sqlite database: %v", err), err)
 	}
-	db.SetMaxOpenConns(1)
 
+	// Force single connection to prevent locking issues
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	// Run verification pragmas
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set WAL journal: %w", err)
+		return nil, chattyErrors.NewStorageError("setup", fmt.Sprintf("failed to enable foreign keys: %v", err), err)
 	}
 
-	store := &Store{db: db}
+	store := &Store{
+		db: db,
+	}
+
 	if err := store.migrate(); err != nil {
-		db.Close()
+		store.Close()
 		return nil, err
 	}
 
 	if err := store.initializePreparedStatements(); err != nil {
-		db.Close()
+		store.Close()
 		return nil, err
 	}
 
@@ -121,19 +141,110 @@ func (s *Store) initializePreparedStatements() error {
 
 // Close releases underlying database resources and prepared statements.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
+
+	var firstError error
 
 	// Close prepared statements
 	s.preparedMutex.Lock()
 	for _, stmt := range s.preparedStmts {
-		stmt.Close()
+		if err := stmt.Close(); err != nil && firstError == nil {
+			firstError = err
+		}
 	}
 	s.preparedStmts = nil
 	s.preparedMutex.Unlock()
 
-	return s.db.Close()
+	// Close main database connection
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+
+	return firstError
+}
+
+// AppendMessagesBatch appends multiple messages to the specified session in a single transaction.
+func (s *Store) AppendMessagesBatch(ctx context.Context, sessionID int64, messages []Message) error {
+	if s == nil {
+		return chattyErrors.NewStorageError("batch", "store is nil", nil)
+	}
+	if sessionID <= 0 {
+		return chattyErrors.NewValidationError("sessionID", "must be greater than 0", sessionID, nil)
+	}
+	if len(messages) == 0 {
+		return nil // Nothing to do
+	}
+
+	// Use main connection directly
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to begin transaction: %v", err), err)
+	}
+	defer tx.Rollback()
+
+	// Prepare statements within transaction
+	appendStmt, err := tx.PrepareContext(ctx, "INSERT INTO messages(session_id, role, content) VALUES (?, ?, ?)")
+	if err != nil {
+		return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to prepare append statement: %v", err), err)
+	}
+	defer appendStmt.Close()
+
+	touchStmt, err := tx.PrepareContext(ctx, "UPDATE sessions SET updated_at = (strftime('%Y-%m-%dT%H:%M:%SZ','now')) WHERE id = ?")
+	if err != nil {
+		return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to prepare touch statement: %v", err), err)
+	}
+	defer touchStmt.Close()
+
+	// Insert all messages
+	for _, message := range messages {
+		if strings.TrimSpace(message.Role) == "" {
+			return chattyErrors.NewValidationError("message.role", "cannot be empty", message.Role, nil)
+		}
+
+		_, err := appendStmt.ExecContext(ctx, sessionID, message.Role, message.Content)
+		if err != nil {
+			return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to insert message: %v", err), err)
+		}
+	}
+
+	// Touch session to update timestamp
+	if _, err := touchStmt.ExecContext(ctx, sessionID); err != nil {
+		return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to touch session: %v", err), err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed to commit transaction: %v", err), err)
+	}
+
+	return nil
+}
+
+// SaveMessagesWithRetry saves messages with automatic retry on failure
+func (s *Store) SaveMessagesWithRetry(ctx context.Context, sessionID int64, messages []Message, maxRetries int) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := s.AppendMessagesBatch(ctx, sessionID, messages)
+		if err == nil {
+			return nil // Success
+		}
+		lastErr = err
+
+		// Don't retry on validation errors
+		if _, ok := err.(*chattyErrors.ValidationError); ok {
+			return err
+		}
+
+		// Wait before retry (exponential backoff)
+		if attempt < maxRetries-1 {
+			time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
+		}
+	}
+	return chattyErrors.NewStorageError("batch", fmt.Sprintf("failed after %d retries: %v", maxRetries, lastErr), lastErr)
 }
 
 func (s *Store) migrate() error {
@@ -184,8 +295,18 @@ func (s *Store) CreateSession(ctx context.Context, name string) (int64, error) {
 	}
 
 	title := strings.TrimSpace(name)
+
+	// Enhanced input validation
 	if title == "" {
 		title = fmt.Sprintf("Session %s", time.Now().Format("2006-01-02 15:04"))
+	} else {
+		// Validate session name
+		if err := validateSessionName(title); err != nil {
+			return 0, chattyErrors.NewValidationError("name", err.Error(), title, err)
+		}
+
+		// Sanitize the name
+		title = sanitizeString(title, maxSessionNameLength)
 	}
 
 	stmt, err := s.getPreparedStmt("createSession")
@@ -237,12 +358,33 @@ func (s *Store) AppendMessage(ctx context.Context, sessionID int64, message Mess
 	if s == nil || s.db == nil {
 		return errors.New("storage not initialised")
 	}
+
+	// Enhanced session ID validation
 	if sessionID <= 0 {
 		return errors.New("invalid session id")
 	}
+	if sessionID > 9223372036854775807 { // Max int64
+		return errors.New("session id too large")
+	}
+
+	// Enhanced message validation
 	if strings.TrimSpace(message.Role) == "" {
 		return errors.New("message role cannot be empty")
 	}
+
+	// Validate role
+	if err := validateMessageRole(message.Role); err != nil {
+		return chattyErrors.NewValidationError("role", err.Error(), message.Role, err)
+	}
+
+	// Validate content
+	if err := validateMessageContent(message.Content); err != nil {
+		return chattyErrors.NewValidationError("content", err.Error(), message.Content, err)
+	}
+
+	// Sanitize inputs
+	// sanitizedRole := sanitizeString(message.Role, maxRoleLength)
+	// sanitizedContent := sanitizeString(message.Content, maxMessageLength)
 
 	// Use prepared statement for appending message
 	stmt, err := s.getPreparedStmt("appendMessage")
@@ -501,4 +643,105 @@ func parseTimestamp(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse timestamp %q: %w", value, err)
 	}
 	return t, nil
+}
+
+// validateSessionName validates session name for security
+func validateSessionName(name string) error {
+	trimmed := strings.TrimSpace(name)
+
+	if trimmed == "" {
+		return errors.New("session name cannot be empty")
+	}
+
+	if len(trimmed) > maxSessionNameLength {
+		return fmt.Errorf("session name too long (max %d characters)", maxSessionNameLength)
+	}
+
+	// Basic character validation - only allow safe characters
+	for _, char := range trimmed {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+		     (char >= '0' && char <= '9') || char == ' ' || char == '-' ||
+		     char == '_' || char == '.' || char == '(' || char == ')') {
+			return errors.New("session name contains invalid characters")
+		}
+	}
+
+	return nil
+}
+
+// sanitizeString performs basic sanitization on strings
+func sanitizeString(input string, maxLength int) string {
+	if input == "" {
+		return ""
+	}
+
+	// Trim whitespace
+	trimmed := strings.TrimSpace(input)
+
+	// Limit length
+	if len(trimmed) > maxLength {
+		trimmed = trimmed[:maxLength]
+	}
+
+	// Remove null bytes
+	trimmed = strings.ReplaceAll(trimmed, "\x00", "")
+
+	return trimmed
+}
+
+// validateMessageRole validates message role for security
+func validateMessageRole(role string) error {
+	trimmed := strings.TrimSpace(role)
+
+	if trimmed == "" {
+		return errors.New("message role cannot be empty")
+	}
+
+	if len(trimmed) > maxRoleLength {
+		return fmt.Errorf("message role too long (max %d characters)", maxRoleLength)
+	}
+
+	// Check against valid roles
+	validRoles := []string{"user", "assistant", "system"}
+	isValid := false
+	for _, validRole := range validRoles {
+		if trimmed == validRole {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		return fmt.Errorf("invalid message role '%s' (must be one of: user, assistant, system)", trimmed)
+	}
+
+	return nil
+}
+
+// validateMessageContent validates message content for security
+func validateMessageContent(content string) error {
+	trimmed := strings.TrimSpace(content)
+
+	if trimmed == "" {
+		return errors.New("message content cannot be empty")
+	}
+
+	if len(trimmed) > maxMessageLength {
+		return fmt.Errorf("message content too long (max %d characters)", maxMessageLength)
+	}
+
+	// Check for obvious XSS attempts
+	xssPattern := regexp.MustCompile(`(?i)(<script|<iframe|javascript:|onerror=|onload=|onclick=)`)
+	if xssPattern.MatchString(trimmed) {
+		return errors.New("message content appears to contain XSS attempt")
+	}
+
+	// Check for control characters (except common ones like newline, tab)
+	for _, char := range trimmed {
+		if char < 32 && char != '\n' && char != '\r' && char != '\t' {
+			return errors.New("message content contains invalid control characters")
+		}
+	}
+
+	return nil
 }

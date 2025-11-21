@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoad_DefaultConfigWithEnvOverrides(t *testing.T) {
-	t.Setenv(envAPIKey, "test-key")
+	t.Setenv(envAPIKey, "sk-abc123def456ghi789jkl012mno345pqr")
 	t.Setenv(envAPIURL, "https://example.com")
 
 	cfg, err := Load("")
@@ -19,7 +19,7 @@ func TestLoad_DefaultConfigWithEnvOverrides(t *testing.T) {
 		t.Fatalf("expected API URL override, got %q", cfg.API.URL)
 	}
 
-	if cfg.API.Key != "test-key" {
+	if cfg.API.Key != "sk-abc123def456ghi789jkl012mno345pqr" {
 		t.Fatalf("expected API key override, got %q", cfg.API.Key)
 	}
 
@@ -34,7 +34,7 @@ func TestLoad_FromFile(t *testing.T) {
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	content := []byte("api:\n  url: https://api.test/v1\n  key: test-token\nmodel:\n  name: gpt-test\n  temperature: 0.5\n  stream: false\n")
+	content := []byte("api:\n  url: https://api.test/v1\n  key: sk-abc123def456ghi789jkl012mno345pqr\nmodel:\n  name: gpt-test\n  temperature: 0.5\n  stream: false\n")
 
 	if err := os.WriteFile(configPath, content, 0o600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -48,8 +48,8 @@ func TestLoad_FromFile(t *testing.T) {
 	if cfg.API.URL != "https://api.test/v1" {
 		t.Errorf("expected API URL %q, got %q", "https://api.test/v1", cfg.API.URL)
 	}
-	if cfg.API.Key != "test-token" {
-		t.Errorf("expected API key %q, got %q", "test-token", cfg.API.Key)
+	if cfg.API.Key != "sk-abc123def456ghi789jkl012mno345pqr" {
+		t.Errorf("expected API key %q, got %q", "sk-abc123def456ghi789jkl012mno345pqr", cfg.API.Key)
 	}
 	if cfg.Model.Name != "gpt-test" {
 		t.Errorf("expected model name %q, got %q", "gpt-test", cfg.Model.Name)
