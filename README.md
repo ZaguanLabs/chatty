@@ -5,8 +5,9 @@
 
 A minimal terminal chat client for OpenAI-compatible APIs, written in Go.
 
-- This project has been replaced by https://github.com/ZaguanLabs/zchat.zsh for general chat and https://github.com/ZaguanLabs/zcoder.zsh for coding/sysadmin.
-
+```
+This project has been replaced by https://github.com/ZaguanLabs/zchat.zsh for general chat and https://github.com/ZaguanLabs/zcoder.zsh for coding/sysadmin.
+```
 
 ## Why Chatty?
 
