@@ -5,6 +5,9 @@
 
 A minimal terminal chat client for OpenAI-compatible APIs, written in Go.
 
+  This project has been replaced by https://github.com/ZaguanLabs/zchat.zsh
+
+
 ## Why Chatty?
 
 Opening a browser, navigating to ChatGPT or Claude, waiting for the page to load—it all takes time. When you just need a quick answer or want to iterate on an idea, that friction adds up.
